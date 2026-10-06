@@ -100,8 +100,14 @@ if __name__ == '__main__':
 
     partidos["index_partido"] = range(1, len(partidos) + 1)
     partidos = partidos.set_index("index_partido")
-    '''
-    print(partidos) # UNA VEZ TENEMOS TODA LA INFORMACION, VAMOS A BORRAR DUPLICADOS Y ANALIZAR NULOS
+
+    # He relizado un value counts en cada una de las columnas del df final y tenemos dos cambios que corregir rapidamente:
+    partidos['penalty_local'] = partidos['penalty_local'].replace({30: 3, 20: 2, 40: 4})
+    partidos['penalty_visitante'] = partidos['penalty_visitante'].replace({30: 3, 40: 4})
+    partidos['pais_partido'] = partidos['pais_partido'].replace({'usa': 'USA'})
+
+    
+    #print(partidos) # UNA VEZ TENEMOS TODA LA INFORMACION, VAMOS A BORRAR DUPLICADOS Y ANALIZAR NULOS
 
     
     print("Duplicados totales:", partidos.duplicated().sum()) # HEMOS OBTENIDO 100 DUPLICADOS TOTALES, ASI QUE LOS ELIMINAMOS
@@ -112,9 +118,14 @@ if __name__ == '__main__':
     print("Valores nulos por columna:")
     print(partidos.isnull().sum())
 
-    print(partidos.dtypes)
+    #print(partidos.dtypes)
+
     '''
-    # HEMOS ACABADO PARTIDOS
+    for col in columnas_deseadas:
+        print(partidos[col].value_counts())
+        print()
+    '''
+    # HEMOS ACABADO PARTIDOS ----------------------------------------------------------------------------------------------------
 
 
     # -----------------------------JUGADORES ------------------------------
@@ -123,8 +134,6 @@ if __name__ == '__main__':
 
     #mezclamos las estadisticas de los jugadores segun el id de cada jugador
     df_jugadores = pd.merge(left = df_jugadores, right = df_2026_player_stats, on = "player_id", how = "left" )
-
-    print(df_jugadores.dtypes)
 
     #mezclamos para traer el nombre de la seleccion nacional mediante el id de cada seleccion
     df_jugadores = pd.merge(left = df_jugadores, right = df_2026_nationalteams, left_on="team_id_x", right_on = "team_id", how = "left")
@@ -135,17 +144,72 @@ if __name__ == '__main__':
         "position_x": "posicion", "market_value_eur": "valor_mercado", "matches_played": "partidos_jugados", "minutes_played": "minutos_jugados",
         "goals": "goles", "assists": "asistencias", "shots": "tiros", "yellow_cards": "tarjetas_amarillas","red_cards": "tarjetas_rojas",
         "saves": "paradas", "goals_conceded": "goles_concedidos", "average_rating": "calificacion_media", "player_name_x": "nombre_jugador",}
-
     df_jugadores = df_jugadores.rename(columns=cambios_nombre_jugadores)
 
-    df_jugadores["valor_mercado"] = df_jugadores["valor_mercado"] / 1_000_000
+
+    # tenemos que formatear la columnade valor mercado igual que pide el enunciado
+    #print(df_jugadores['valor_mercado'].value_counts()) #tenemos 90 jugadores con valor_mercado = nan M %. Tal y como dice el enunciado, debemos imputarlos
+    # para ello, vamos a imputar por la media de todos los jugadores de su misma seleccion.
+    medias_por_pais = df_jugadores.groupby("seleccion_nacional")["valor_mercado"].mean()
+    df_jugadores["valor_mercado"] = df_jugadores["valor_mercado"].fillna(df_jugadores["seleccion_nacional"].map(medias_por_pais))
     df_jugadores["valor_mercado"] = (df_jugadores["valor_mercado"].round(1).astype(str) + " M€")
+    #IMPUTACION DE VALOR_MERCADO HECHAAAAAA
+
+
+
+    # todas estas columnas se nos piden en formato numerico, por lo tanto rellenamos todos los nan como 0 ya que interpretamos que un nan = 0 goles por ejemplo
+    # una vez eliminados todos los nan podemos convertir en int.
+    columnas_numericas = ["goles", "asistencias", "tiros", "tarjetas_amarillas", "tarjetas_rojas", "paradas", "goles_concedidos",]
+    for col in columnas_numericas:
+        df_jugadores[col] = df_jugadores[col].fillna(0)
+        df_jugadores[col] = df_jugadores[col].astype(int)
+
+
+
+
+    # UNA VEZ TENEMOS TODA LA INFORMACION QUE NECESITAMOS CON SU NOMBRE CORRECTO, NOS QUEDAMOS SOLO CON LAS PEDIDAS EN EL ENUNCIADO
+    columnas_deseadas_jugadores = ["nombre_jugador", "seleccion_nacional", "club_jugador", "partidos_seleccion", "posicion", "valor_mercado",
+    "partidos_jugados", "minutos_jugados", "goles", "asistencias", "tiros", "tarjetas_amarillas", "tarjetas_rojas", "paradas",
+    "goles_concedidos", "calificacion_media",]
+
+    jugadores = df_jugadores[columnas_deseadas_jugadores].copy()
+    jugadores = jugadores.set_index("nombre_jugador") # fijamos con setindex el indice pedido por el enunciado.
+
+
+    print(jugadores.dtypes)
+
+    print("Duplicados totales:", jugadores.duplicated().sum()) # HEMOS OBTENIDO 208 DUPLICADOS TOTALES, ASI QUE LOS ELIMINAMOS
+    jugadores = jugadores.drop_duplicates()
+    print("Duplicados totales despues de limpieza:", jugadores.duplicated().sum())
+
+
+
+    #Comprobamos si quedo algun valor nulo en alguna de las 15 columnas
+    print("Valores nulos por columna:")
+    print(jugadores.isnull().sum()) # -----podemos ver que hay 320 calificaciones_medias faltantes, como dice el enunciado, las imputaremos mediante regresion.
+    # imputar por regresion en este caso si que tiene sentido ya que falta el 20 % mas o menos y obviamente hay una correlacion entre goles y valor.
+
+    jugadores = f.imputar_calificacion_por_regresion(jugadores)
+
+    print(jugadores.isnull().sum())
+
+
+    '''
+    for col in columnas_deseadas_jugadores:
+            if col == 'nombre_jugador':
+                pass
+            else:
+                print(jugadores[col].value_counts())
+                print()
+    '''
+     # aqui hemos podido comprobar que todas las columnas estan correctamente. Incluidas las dos que hemos imputado
+
+     # HEMOS ACABADO JUGADORES ------------------------------------------------------
+
+
+     # --------------------------------- EVENTOS --------------------------------------
 
     
-
-
-    print(df_jugadores.dtypes)
-
 
 
 
