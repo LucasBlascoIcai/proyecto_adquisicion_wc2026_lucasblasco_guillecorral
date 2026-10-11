@@ -411,9 +411,9 @@ if __name__ == '__main__':
 
     # VOY A EXPORTAR OS FICHEROS EN FORMATO EXCEL Y MOSTRAR ALGUNA GRAFICA DE LOS DATAFRAMES YA LIMPIOS.
 
-    partidos.to_excel('partidos.xlsx', index=True)
-    jugadores.to_excel('jugadores.xlsx', index=True)
-    eventos.to_excel('eventos.xlsx', index=True)
+    partidos.to_excel('partidosWC26.xlsx', index=True)
+    jugadores.to_excel('jugadoresWC26.xlsx', index=True)
+    eventos.to_excel('eventosWC26.xlsx', index=True)
 
 
     # VOY A MOSTRAR EL TOP 10 JUGADORES CON MAS GOLES
