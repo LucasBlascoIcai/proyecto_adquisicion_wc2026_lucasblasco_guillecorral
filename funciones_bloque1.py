@@ -69,3 +69,4 @@ def imputar_calificacion_por_regresion(df):
     df_imputed["calificacion_media"] = df_imputed["calificacion_media"].round(2)
 
     return df_imputed
+

@@ -176,22 +176,22 @@ if __name__ == '__main__':
     jugadores = jugadores.set_index("nombre_jugador") # fijamos con setindex el indice pedido por el enunciado.
 
 
-    print(jugadores.dtypes)
+    #print(jugadores.dtypes)
 
-    print("Duplicados totales:", jugadores.duplicated().sum()) # HEMOS OBTENIDO 208 DUPLICADOS TOTALES, ASI QUE LOS ELIMINAMOS
+    #print("Duplicados totales:", jugadores.duplicated().sum()) # HEMOS OBTENIDO 208 DUPLICADOS TOTALES, ASI QUE LOS ELIMINAMOS
     jugadores = jugadores.drop_duplicates()
-    print("Duplicados totales despues de limpieza:", jugadores.duplicated().sum())
+    #print("Duplicados totales despues de limpieza:", jugadores.duplicated().sum())
 
 
 
     #Comprobamos si quedo algun valor nulo en alguna de las 15 columnas
-    print("Valores nulos por columna:")
-    print(jugadores.isnull().sum()) # -----podemos ver que hay 320 calificaciones_medias faltantes, como dice el enunciado, las imputaremos mediante regresion.
+    #print("Valores nulos por columna:")
+    #print(jugadores.isnull().sum()) # -----podemos ver que hay 320 calificaciones_medias faltantes, como dice el enunciado, las imputaremos mediante regresion.
     # imputar por regresion en este caso si que tiene sentido ya que falta el 20 % mas o menos y obviamente hay una correlacion entre goles y valor.
 
     jugadores = f.imputar_calificacion_por_regresion(jugadores)
 
-    print(jugadores.isnull().sum())
+    #print(jugadores.isnull().sum())
 
 
     '''
@@ -208,8 +208,38 @@ if __name__ == '__main__':
 
 
      # --------------------------------- EVENTOS --------------------------------------
+    df_eventos = df_2026_match_register.copy() # este dataframe es CLARAMENTE EL BASE, tiene todo lo pedido en evntos pero con sus ids, asi que 
+    #se trata de hacer merges para ir enganchando
+
+    #print(df_eventos['event_type'].value_counts())
+    #nos traemos el nombre de jugador mediante player_id y nos traemos nombre seleccion mediante team_id
+    df_eventos = pd.merge(left = df_eventos, right = df_2026_nationalteams, on = 'team_id', how = 'left')
+    df_eventos = pd.merge(left = df_eventos, right = df_2026_squads_and_players, on = 'player_id', how = 'left')
+
+
+    # renombramos las columnas tal y como vienen estipuladas en el enunciado
+    cambios_nombre_eventos = { "minute": "minuto_evento", "match_id": "index_partido" , "player_name": "nombre_jugador", "event_type": "tipo_evento", "team_name": "seleccion_evento"}
+    df_eventos = df_eventos.rename(columns=cambios_nombre_eventos)
+
+    df_eventos = df_eventos.drop_duplicates()
+
+    # Vamos a eliminar todos los minutos que no entren en el rango valido : 1-120 o que no sean nan. 
+    # Los que son NAN los dejamos vivos porque como dice el enunciado, los vamos a tener que interpolar mas tarde.
+    df_eventos["minuto_evento"] = pd.to_numeric(df_eventos["minuto_evento"], errors="coerce")
+    condicion_minuto_valido = (df_eventos["minuto_evento"].isna()) | ((df_eventos["minuto_evento"] >= 1) & (df_eventos["minuto_evento"] <= 130))
+    df_eventos = df_eventos[condicion_minuto_valido].copy()
+
+    # nos quedamos SOLO con las columnas que nos interesan
+    columnas_deseadas_eventos = [ "minuto_evento", "index_partido", "nombre_jugador", "tipo_evento", "seleccion_evento"]
+    eventos = df_eventos[columnas_deseadas_eventos].copy()
 
     
+
+    # creamos el indice pedido.
+    eventos["index_evento"] = range(1, len(eventos) + 1)
+    eventos = eventos.set_index("index_evento")
+
+
 
 
 
