@@ -1,6 +1,6 @@
 import pandas as pd
 import funciones_bloque1 as f # Me creare mis funciones en un fichero de funciones para tener un main mas limpio y facil de entender y seguir.
-
+import matplotlib.pyplot as plt
 # Cabe recalcar que hemos usado el dtypes, y el value_counts continuamente para comprobar el contenido todo el rato en la terminal y saber por donde seguir.
 # Hemos borrado la mayoria de ellos para tener un main mas limpio.
 
@@ -77,9 +77,7 @@ if __name__ == '__main__':
     df_partidos = df_partidos.rename(columns = cambios_nombre_df_partidos)
 
     # REVISAAAAR LIMPIEZA DE FECHAS
-    df_partidos['fecha_partido'] = pd.to_datetime(df_partidos["date"], errors = "coerce") # pasamos la fecha a formato fecha y le cambiamos el nombre ya de paso
-    df_partidos["fecha_partido"] = df_partidos["fecha_partido"].dt.strftime("%d/%B/%y") # ESTA LINEA ME HA AYUDADO LA IA PARA PONER LA FECHA EN EL FORMATO PEIDDO POR EL ENUNCIADO
-    
+    df_partidos["fecha_partido"] = df_partidos["date"].apply(f.unificar_fecha)
 
     df_partidos["penalty_local"] = df_partidos["home_penalty_score"].fillna(0) # home_penalty tiene valores NAN para indicar que no hubo penaltis, por ello lo llenamos con 0 como pide el enunciado
     df_partidos["penalty_local"] = df_partidos["penalty_local"].astype(int)# pasamos todos los valores de float a int porque ya hemos asegurado que son todos numeros y es mas facil trabajar con ints
@@ -110,13 +108,13 @@ if __name__ == '__main__':
     #print(partidos) # UNA VEZ TENEMOS TODA LA INFORMACION, VAMOS A BORRAR DUPLICADOS Y ANALIZAR NULOS
 
     
-    print("Duplicados totales:", partidos.duplicated().sum()) # HEMOS OBTENIDO 100 DUPLICADOS TOTALES, ASI QUE LOS ELIMINAMOS
-    partidos = partidos.drop_duplicates()
-    print("Duplicados totales despues de limpieza:", partidos.duplicated().sum())
+    #print("Duplicados totales:", partidos.duplicated().sum()) # HEMOS OBTENIDO 100 DUPLICADOS TOTALES, ASI QUE LOS ELIMINAMOS
+    #partidos = partidos.drop_duplicates()
+    #print("Duplicados totales despues de limpieza:", partidos.duplicated().sum())
 
     #Comprobamos si quedo algun valor nulo en alguna de las 13 columnas
-    print("Valores nulos por columna:")
-    print(partidos.isnull().sum())
+    #print("Valores nulos por columna:")
+    #print(partidos.isnull().sum())
 
     #print(partidos.dtypes)
 
@@ -229,16 +227,48 @@ if __name__ == '__main__':
     condicion_minuto_valido = (df_eventos["minuto_evento"].isna()) | ((df_eventos["minuto_evento"] >= 1) & (df_eventos["minuto_evento"] <= 130))
     df_eventos = df_eventos[condicion_minuto_valido].copy()
 
+    # El enunciado pide explicitamente controlar la consistencia de eventos, asi que he dejado los eventos de juego reales. 
+    eventos_validos = ["Goal", "Assist", "Yellow Card", "Red Card"]
+    df_eventos = df_eventos[df_eventos["tipo_evento"].isin(eventos_validos)].copy()
+
+    # Además se nos pide imputar con INTERPOLACIÓN SI O SI, asi que hemos creado una funcion para ello.
+    df_eventos = f.imputar_minutos_por_interpolacion(df_eventos)
+
     # nos quedamos SOLO con las columnas que nos interesan
     columnas_deseadas_eventos = [ "minuto_evento", "index_partido", "nombre_jugador", "tipo_evento", "seleccion_evento"]
     eventos = df_eventos[columnas_deseadas_eventos].copy()
 
-    
 
     # creamos el indice pedido.
     eventos["index_evento"] = range(1, len(eventos) + 1)
     eventos = eventos.set_index("index_evento")
 
+    # --------------------Hemos acabado EVENTOS--------------------------------------
+
+
+    # ULTIMA PARTE -------------------------
+
+    # VOY A EXPORTAR OS FICHEROS EN FORMATO EXCEL Y MOSTRAR ALGUNA GRAFICA DE LOS DATAFRAMES YA LIMPIOS.
+
+    partidos.to_excel('partidos.xlsx', index=True)
+    jugadores.to_excel('jugadores.xlsx', index=True)
+    eventos.to_excel('eventos.xlsx', index=True)
+
+
+    # VOY A MOSTRAR EL TOP 10 JUGADORES CON MAS GOLES
+    top_goleadores = jugadores.sort_values(by="goles", ascending=False).head(10)
+
+    plt.figure(figsize=(9, 5))
+    plt.bar(
+        top_goleadores.index,
+        top_goleadores["goles"])
+    
+    plt.title("Top 10 Máximos Goleadores del Torneo")
+    plt.xlabel("Jugador")
+    plt.ylabel("Goles Anotados")
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+    plt.show()
 
 
 
