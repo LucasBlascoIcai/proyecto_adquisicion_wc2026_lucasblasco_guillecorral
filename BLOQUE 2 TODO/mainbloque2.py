@@ -79,3 +79,78 @@ fig3 = px.pie(
 fig3.show()
 # --------------------------------------------------------------------------- FINAL GRAFICO 3.
 
+
+
+
+#--------------------------------------------------------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------------------------------------------------------
+# SEGUNDO APARTADO - RENDIMIENTO DE JUGADORES CLAVE- 3 GRAFICOS
+
+# 4. Dispersión: Valor de Mercado vs Calificación Media (Mínimo 180 minutos)
+jugadores_180 = jugadores[jugadores['minutos_jugados'] >= 180]
+
+fig4 = px.scatter(
+    jugadores_180,
+    x='valor_mercado_num',
+    y='calificacion_media',
+    color='posicion',
+    hover_name='nombre_jugador',
+    title="Valor de Mercado vs Calificación Media (Mínimo 180 min)"
+)
+fig4.show()
+# --------------------------------------------------------------------------- FINAL GRAFICO 4.
+jugadores = jugadores.sort_values(by='valor_mercado_num', ascending=False)
+jugadores['ranking_mercado'] = range(1, len(jugadores) + 1)
+
+# Filtramos a los que tienen minutos jugados
+jugadores_con_minutos = jugadores[jugadores['minutos_jugados'] > 0].copy()
+mins = jugadores_con_minutos['minutos_jugados']
+
+jugadores_con_minutos['goles/minuto'] = jugadores_con_minutos['goles'] / mins
+jugadores_con_minutos['asistencias/minuto'] = jugadores_con_minutos['asistencias'] / mins
+jugadores_con_minutos['goles+asistencias/minuto'] = (jugadores_con_minutos['goles'] + jugadores_con_minutos['asistencias']) / mins
+jugadores_con_minutos['goles_concedidos/minuto'] = jugadores_con_minutos['goles_concedidos'] / mins
+jugadores_con_minutos['tarjetas_amarillas/minuto'] = jugadores_con_minutos['tarjetas_amarillas'] / mins
+jugadores_con_minutos['tarjetas_rojas/minuto'] = jugadores_con_minutos['tarjetas_rojas'] / mins
+
+# Métrica agregada
+jugadores_con_minutos['metrica_agregada'] = (
+    jugadores_con_minutos['goles'] * 3 +
+    jugadores_con_minutos['asistencias'] * 2 -
+    jugadores_con_minutos['tarjetas_amarillas'] * 0.5 -
+    jugadores_con_minutos['tarjetas_rojas'] * 2
+) / mins
+
+# Top 15 ordenado por métrica agregada
+top15 = jugadores_con_minutos.sort_values(by='metrica_agregada', ascending=False).head(15)
+
+fig5 = px.bar(
+    top15.sort_values(by='metrica_agregada', ascending=True),
+    x='metrica_agregada',
+    y='nombre_jugador',
+    orientation='h',
+    hover_data=['ranking_mercado'],
+    title="Top 15 Jugadores según Métrica Agregada"
+)
+fig5.show()
+# --------------------------------------------------------------------------- FINAL GRAFICO 5.
+
+
+# 6. Gráfico de burbujas: Minutos vs Calificación Media
+jugadores['ha_marcado'] = jugadores['goles'].apply(lambda x: 'Sí' if x > 0 else 'No')
+
+fig6 = px.scatter(
+    jugadores,
+    x='minutos_jugados',
+    y='calificacion_media',
+    size='valor_mercado_num',
+    color='ha_marcado',
+    hover_name='nombre_jugador',
+    title="Minutos Jugados vs Calificación Media (Tamaño = Valor Mercado)"
+)
+fig6.show()
+# --------------------------------------------------------------------------- FINAL GRAFICO 6.
+
+
+
