@@ -13,8 +13,6 @@ partidos = pd.read_excel('partidosWC26.xlsx')
 # HEMOS CARGADO LOS EXCEL TAL Y COMO LOS ACABAMOS EN EL APARTADO ANTERIOR, E IMPORTADO LAS LIBRERIAS NECESARIAS PARA ESTE BLOQUE. 
 # A PARTIR DE AQUI YA VAMOS CON LO NUEVO DE ESTE APARTADO.
 
-# Limpiar valor de mercado para que sea numérico
-jugadores['valor_mercado_num'] = (jugadores['valor_mercado'].str.replace(' M€', '', regex=False).astype(float))
 
 #------------------------------------------------------------------------------------------
 #Bloque 1 sobre ventanas de partidos, vamos a hacer los tres graficos por separado marcando el inicio y final de cada uno.
@@ -22,9 +20,9 @@ jugadores['valor_mercado_num'] = (jugadores['valor_mercado'].str.replace(' M€'
 
 
 #  GRAFICO 1 --------------------------------------------(ej: partido 1) ---------------
-partido_id = 1
-eventos_partido = eventos[eventos['index_partido'] == partido_id].copy()
-eventos_partido['ocurrencia'] = 1
+partido_id = 75
+eventos_partido = eventos[eventos['index_partido'] == partido_id].copy()    # filtramos un dataframe para quedarnos solo con el id pedido
+eventos_partido['ocurrencia'] = 1 # para darle un valor numerico y asi poder cuantificar los eventos en las barras, de esta manera si hay mas de un evento se suman los unos y la barra es mas grande
 
 fig1 = px.bar(
     eventos_partido,
@@ -41,8 +39,8 @@ fig1.show()
 
 # GRAFICO 2 ----------------------------------- ---------------------------------------
 bins = [0, 15, 30, 45, 60, 75, 90, 105, 120] # He seleccionado estas franjas de minutos, cada 15 mins habra un bin - barra
-labels = ['1-15', '16-30', '31-45', '46-60', '61-75', '76-90', '91-105', '106-120']
-eventos['tramo_minuto'] = pd.cut(eventos['minuto_evento'], bins=bins, labels=labels)
+labels = ['1-15', '16-30', '31-45', '46-60', '61-75', '76-90', '91-105', '106-120'] # pa que quede mas claro en que tramo estamos. Pura estetica
+eventos['tramo_minuto'] = pd.cut(eventos['minuto_evento'], bins=bins, labels=labels) # para guardar la informacion de cada quince minutos por su cuenta
 
 tabla_calor = pd.crosstab(eventos['tipo_evento'], eventos['tramo_minuto'])
 
@@ -58,13 +56,13 @@ fig2.show()
 
 
 #GRAFICO 3 ------------------------------------------------------------------------
-pais = 'Spain'
+pais = 'Tunisia'
 
 # Obtenemos los partidos que jugó la selección directamente desde eventos
-ids_pais = eventos[eventos['seleccion_evento'] == pais]['index_partido'].unique()
+ids_pais = eventos[eventos['seleccion_evento'] == pais]['index_partido'].unique() # filtramos con el pais que nos hemos quedado al igual que el grafico 1
 
 # Filtramos todos los eventos de esos partidos
-eventos_pais = eventos[eventos['index_partido'].isin(ids_pais)].copy()
+eventos_pais = eventos[eventos['index_partido'].isin(ids_pais)].copy() # extramos todos los elementos que le han ocurrido a esa seleccion
 
 # Determinamos si cada evento fue 'A favor' o 'En contra'
 balance = []
@@ -75,7 +73,7 @@ for seleccion in eventos_pais['seleccion_evento']:
         balance.append('En contra')
 
 eventos_pais['balance'] = balance
-eventos_pais['detalle'] = eventos_pais['tipo_evento'] + " " + eventos_pais['balance']
+eventos_pais['detalle'] = eventos_pais['tipo_evento'] + " " + eventos_pais['balance'] # lo concatenamos como string para que quede bien, ejemplo: Roja en contra o Amarilla a favor
 
 # Contamos la cantidad de cada tipo de evento
 conteo_pais = eventos_pais['detalle'].value_counts().reset_index()
@@ -101,11 +99,11 @@ fig3.show()
 # SEGUNDO APARTADO - RENDIMIENTO DE JUGADORES CLAVE- 3 GRAFICOS
 
 #GRAFICO 4
-jugadores_180 = jugadores[jugadores['minutos_jugados'] >= 180]
+jugadores_180 = jugadores[jugadores['minutos_jugados'] >= 180] # tal y como pide el enunciado, nos quedamos con los jugadores de mas de 90 minutos
 
 fig4 = px.scatter(
     jugadores_180,
-    x='valor_mercado_num',
+    x='valor_mercado',
     y='calificacion_media',
     color='posicion',
     hover_name='nombre_jugador',
@@ -113,11 +111,12 @@ fig4 = px.scatter(
 )
 fig4.show()
 # --------------------------------------------------------------------------- FINAL GRAFICO 4.
-jugadores = jugadores.sort_values(by='valor_mercado_num', ascending=False)
+jugadores = jugadores.sort_values(by='valor_mercado', ascending=False)
 jugadores['ranking_mercado'] = range(1, len(jugadores) + 1)
 
 # Filtramos a los que tienen minutos jugados
-jugadores_con_minutos = jugadores[jugadores['minutos_jugados'] > 90].copy()
+jugadores_con_minutos = jugadores[jugadores['minutos_jugados'] > 90].copy() # esto lo he hecho por mi idea, ya que sino filtraba con jugadores que hubiesen jugado
+#minimo 90 minutos, obtenia resultados rarisimos, por ejemplo si un jugador habia jugado un minuto y habia metido, su barra se disparaba, pero no me parecia una vision real
 mins = jugadores_con_minutos['minutos_jugados']
 
 jugadores_con_minutos['goles/minuto'] = jugadores_con_minutos['goles'] / mins
@@ -136,15 +135,15 @@ jugadores_con_minutos['metrica_agregada'] = (
 ) / mins
 
 # Top 15 ordenado por métrica agregada
-top15 = jugadores_con_minutos.sort_values(by='metrica_agregada', ascending=False).head(15)
+top15 = jugadores_con_minutos.sort_values(by='tarjetas_amarillas/minuto', ascending=False).head(15)
 
 fig5 = px.bar(
-    top15.sort_values(by='metrica_agregada', ascending=True),
-    x='metrica_agregada',
+    top15.sort_values(by='tarjetas_amarillas/minuto', ascending=True),
+    x='tarjetas_amarillas/minuto',
     y='nombre_jugador',
     orientation='h',
     hover_data=['ranking_mercado'],
-    title="Top 15 Jugadores según Métrica Agregada"
+    title="Top 15 Jugadores según Tarjetas_amarillas/minuto"
 )
 fig5.show()
 # --------------------------------------------------------------------------- FINAL GRAFICO 5.
@@ -157,7 +156,7 @@ fig6 = px.scatter(
     jugadores,
     x='minutos_jugados',
     y='calificacion_media',
-    size='valor_mercado_num',
+    size='valor_mercado',
     color='ha_marcado',
     hover_name='nombre_jugador',
     title="Minutos Jugados vs Calificación Media (Tamaño = Valor Mercado)"
@@ -175,15 +174,14 @@ fig6.show()
 
 #GRAFICO 7
 columnas_partido = ['fecha_partido', 'ronda', 'seleccion_local', 'seleccion_visitante']
-partidos_unicos = partidos.drop_duplicates(subset=columnas_partido).copy()
+partidos_unicos = partidos.drop_duplicates(subset=columnas_partido).copy() # quitamos los partidos repetidos por si acaso
 
-partidos_unicos['index_partido'] = range(1, len(partidos_unicos) + 1)
 
-tarjetas = eventos[eventos['tipo_evento'].isin(['Yellow Card', 'Red Card'])]
-tarjetas_partido = tarjetas.groupby('index_partido').size().reset_index(name='total_tarjetas')
+tarjetas = eventos[eventos['tipo_evento'].isin(['Yellow Card', 'Red Card'])] # filtramos solo los eventos de tarjeta
+tarjetas_partido = tarjetas.groupby('index_partido').size().reset_index(name='total_tarjetas') # agrupamos por index , y creamos un nuevo df con el conteo de umero de tarjetas
 
-df_tarjetas = partidos_unicos.merge(tarjetas_partido, on='index_partido', how='left')
-df_tarjetas['total_tarjetas'] = df_tarjetas['total_tarjetas'].fillna(0)
+df_tarjetas = partidos_unicos.merge(tarjetas_partido, on='index_partido', how='left') # mezclamos los dfs que acabamos de crear para darle el conteo de tarjetas al df global
+df_tarjetas['total_tarjetas'] = df_tarjetas['total_tarjetas'].fillna(0) # si no hay nada es que hubo cero tarjetas
 
 fig7 = px.box(
     df_tarjetas,
@@ -203,21 +201,21 @@ fig7.show()
 #GRAFICO 8
 # Tarjeta amarilla = 1, Roja = 3, Gol = 0.2
 puntos_evento = {'Yellow Card': 1.0, 'Red Card': 3.0, 'Goal': 0.2}
-eventos['puntos'] = eventos['tipo_evento'].map(puntos_evento).fillna(0.0)
+eventos['puntos'] = eventos['tipo_evento'].map(puntos_evento).fillna(0.0) # si no hubo ningun de esos eventos le asignamos un 0
 
-indice_partido = eventos.groupby('index_partido')['puntos'].sum().reset_index(name='indice_partido')
-df_arbitros = partidos.merge(indice_partido, on='index_partido', how='left')
-df_arbitros['indice_partido'] = df_arbitros['indice_partido'].fillna(0.0)
+indice_partido = eventos.groupby('index_partido')['puntos'].sum().reset_index(name='indice_partido') # agrupamos segun id y suma la columna de puntos asignada previamente
+df_arbitros = partidos.merge(indice_partido, on='index_partido', how='left') # une la tabla de partidos original con la recien creada
+df_arbitros['indice_partido'] = df_arbitros['indice_partido'].fillna(0.0) # rellenamos los ausentes con 0 puntos
 
-df_puntos = df_arbitros[['arbitro_partido', 'indice_partido']].copy()
-df_puntos['tipo'] = 'Partido'
-df_puntos.rename(columns={'indice_partido': 'valor'}, inplace=True)
+df_puntos = df_arbitros[['arbitro_partido', 'indice_partido']].copy() # nos quedamos con las columnas de interes
+df_puntos['tipo'] = 'Partido' # estetico
+df_puntos.rename(columns={'indice_partido': 'valor'}, inplace=True)# estetico
 
-media_arbitro = df_arbitros.groupby('arbitro_partido')['indice_partido'].mean().reset_index()
+media_arbitro = df_arbitros.groupby('arbitro_partido')['indice_partido'].mean().reset_index() # creamos un nuevo df cagrupando por arbitro y calculando su media de puntos
 media_arbitro['tipo'] = 'Media'
 media_arbitro.rename(columns={'indice_partido': 'valor'}, inplace=True)
 
-df_grafico8 = pd.concat([df_puntos, media_arbitro], ignore_index=True)
+df_grafico8 = pd.concat([df_puntos, media_arbitro], ignore_index=True) # concatenamos verticalmente las filas de df_puntos y media_arbitro
 
 fig8 = px.scatter(
     df_grafico8,
