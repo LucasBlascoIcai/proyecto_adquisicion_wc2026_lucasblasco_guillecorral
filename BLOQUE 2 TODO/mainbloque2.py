@@ -38,19 +38,35 @@ fig1.show()
 
 
 # GRAFICO 2 ----------------------------------- ---------------------------------------
-bins = [0, 15, 30, 45, 60, 75, 90, 105, 120] # He seleccionado estas franjas de minutos, cada 15 mins habra un bin - barra
-labels = ['1-15', '16-30', '31-45', '46-60', '61-75', '76-90', '91-105', '106-120'] # pa que quede mas claro en que tramo estamos. Pura estetica
-eventos['tramo_minuto'] = pd.cut(eventos['minuto_evento'], bins=bins, labels=labels) # para guardar la informacion de cada quince minutos por su cuenta
+# 1. Inputs de filtrado (puedes cambiarlos según lo que te pidan o dejarlos en None para ver todo)
+# Ejemplos de rondas: 'Round of 16', 'Quarter-finals ', 'Semi-finals', 'Final', 'Group Stage'
+ronda_filtro = None             # ej -- 'Round of 16' (o None para todas las rondas)
+eventos_filtro = None           # ej -- ['Goal', 'Yellow Card'] (o None para todos los eventos)
 
-tabla_calor = pd.crosstab(eventos['tipo_evento'], eventos['tramo_minuto'])
+# 2. Traemos la columna 'ronda' desde partidos
+df_g2 = eventos.merge(partidos[['index_partido', 'ronda']], on='index_partido', how='left')
+
+# 3. Aplicamos los filtros si se han definido
+if ronda_filtro is not None:
+    df_g2 = df_g2[df_g2['ronda'] == ronda_filtro]
+
+if eventos_filtro is not None:
+    df_g2 = df_g2[df_g2['tipo_evento'].isin(eventos_filtro)]
+
+# 4. Tramos de minutos y crosstab
+bins = [0, 15, 30, 45, 60, 75, 90, 105, 120]
+labels = ['1-15', '16-30', '31-45', '46-60', '61-75', '76-90', '91-105', '106-120']
+df_g2['tramo_minuto'] = pd.cut(df_g2['minuto_evento'], bins=bins, labels=labels)
+
+tabla_calor = pd.crosstab(df_g2['tipo_evento'], df_g2['tramo_minuto'])
 
 fig2 = px.imshow(
     tabla_calor,
     text_auto=True,
-    title="Densidad de Eventos a lo largo del Partido"
+    title=f"Densidad de Eventos a lo largo del Partido (Ronda: {ronda_filtro if ronda_filtro else 'Todas'})"
 )
 fig2.show()
-#-------------------------------------------------------------------------- FINAL GRAFICO 2
+# -------------------------------------------------------------------------- FINAL GRAFICO 2
 
 
 
@@ -99,18 +115,36 @@ fig3.show()
 # SEGUNDO APARTADO - RENDIMIENTO DE JUGADORES CLAVE- 3 GRAFICOS
 
 #GRAFICO 4
-jugadores_180 = jugadores[jugadores['minutos_jugados'] >= 180] # tal y como pide el enunciado, nos quedamos con los jugadores de mas de 90 minutos
+# 1. Selectores de filtrado (puedes indicar un valor específico o None para no filtrar)
+seleccion_filtro = None       # Ej: 'Spain', 'Argentina', 'France' (o None para todas)
+posicion_filtro = None        # Ej: 'Delantero', 'Centrocampista', 'Defensa', 'Portero' (o None)
+partidos_filtro = None        # Ej: 3, 5 (número exacto) o dejar en None
+
+jugadores_filtrados = jugadores[jugadores['minutos_jugados'] >= 180].copy()  # tal y como pide el enunciado, nos quedamos con los jugadores de mas de 90 minutos
+
+# 3. Aplicación de los selectores si están definidos
+if seleccion_filtro is not None:
+    jugadores_filtrados = jugadores_filtrados[jugadores_filtrados['seleccion_nacional'] == seleccion_filtro]
+
+if posicion_filtro is not None:
+    jugadores_filtrados = jugadores_filtrados[jugadores_filtrados['posicion'] == posicion_filtro]
+
+if partidos_filtro is not None:
+    jugadores_filtrados = jugadores_filtrados[jugadores_filtrados['partidos_jugados'] == partidos_filtro]
 
 fig4 = px.scatter(
-    jugadores_180,
+    jugadores_filtrados,
     x='valor_mercado',
     y='calificacion_media',
     color='posicion',
     hover_name='nombre_jugador',
+    hover_data=['seleccion_nacional', 'partidos_jugados'],
     title="Valor de Mercado vs Calificación Media (Mínimo 180 min)"
 )
 fig4.show()
 # --------------------------------------------------------------------------- FINAL GRAFICO 4.
+
+
 jugadores = jugadores.sort_values(by='valor_mercado', ascending=False)
 jugadores['ranking_mercado'] = range(1, len(jugadores) + 1)
 
@@ -135,30 +169,44 @@ jugadores_con_minutos['metrica_agregada'] = (
 ) / mins
 
 # Top 15 ordenado por métrica agregada
-top15 = jugadores_con_minutos.sort_values(by='tarjetas_amarillas/minuto', ascending=False).head(15)
+top15 = jugadores_con_minutos.sort_values(by='metrica_agregada', ascending=False).head(15)
 
 fig5 = px.bar(
-    top15.sort_values(by='tarjetas_amarillas/minuto', ascending=True),
-    x='tarjetas_amarillas/minuto',
+    top15.sort_values(by='metrica_agregada', ascending=True),
+    x='metrica_agregada',
     y='nombre_jugador',
     orientation='h',
     hover_data=['ranking_mercado'],
-    title="Top 15 Jugadores según Tarjetas_amarillas/minuto"
+    title="Top 15 Jugadores según metrica agregada"
 )
 fig5.show()
 # --------------------------------------------------------------------------- FINAL GRAFICO 5.
 
 
 #GRAFICO 6
-jugadores['ha_marcado'] = jugadores['goles'].apply(lambda x: 'Sí' if x > 0 else 'No')
+seleccion_g6 = None       # Ej: 'Spain', 'Argentina', 'France' (o None para todas)
+posicion_g6 = None        # Ej: 'Delantero', 'Centrocampista', 'Defensa', 'Portero' (o None)
+
+# 2. Copia de trabajo y creación de la columna 'ha_marcado'
+df_g6 = jugadores.copy()
+df_g6['ha_marcado'] = df_g6['goles'].apply(lambda x: 'Sí' if x > 0 else 'No')
+
+
+# 3. Aplicamos los filtros si están definidos
+if seleccion_g6 is not None:
+    df_g6 = df_g6[df_g6['seleccion_nacional'] == seleccion_g6]
+
+if posicion_g6 is not None:
+    df_g6 = df_g6[df_g6['posicion'] == posicion_g6]
 
 fig6 = px.scatter(
-    jugadores,
+    df_g6,
     x='minutos_jugados',
     y='calificacion_media',
     size='valor_mercado',
     color='ha_marcado',
     hover_name='nombre_jugador',
+    hover_data=['seleccion_nacional', 'posicion', 'valor_mercado', 'goles'],
     title="Minutos Jugados vs Calificación Media (Tamaño = Valor Mercado)"
 )
 fig6.show()
@@ -183,12 +231,14 @@ tarjetas_partido = tarjetas.groupby('index_partido').size().reset_index(name='to
 df_tarjetas = partidos_unicos.merge(tarjetas_partido, on='index_partido', how='left') # mezclamos los dfs que acabamos de crear para darle el conteo de tarjetas al df global
 df_tarjetas['total_tarjetas'] = df_tarjetas['total_tarjetas'].fillna(0) # si no hay nada es que hubo cero tarjetas
 
+df_tarjetas['partido'] = df_tarjetas['seleccion_local'] + ' vs ' + df_tarjetas['seleccion_visitante']
+
 fig7 = px.box(
     df_tarjetas,
     x='ronda',
     y='total_tarjetas',
     points="all",
-    hover_data=['seleccion_local', 'seleccion_visitante'],
+    hover_name = 'partido',
     labels={'ronda': 'Ronda del Torneo', 'total_tarjetas': 'Número de Tarjetas'},
     title="Distribución de Tarjetas por Partido según Ronda"
 )
@@ -199,13 +249,25 @@ fig7.show()
 
 
 #GRAFICO 8
+# Filtros solicitados (deja en None para ver todos)
+ronda = None        # ej: 'Round of 16', 'Group Stage'
+seleccion = None    # ej: 'Spain', 'Argentina', 'Mexico'
+
 # Tarjeta amarilla = 1, Roja = 3, Gol = 0.2
-puntos_evento = {'Yellow Card': 1.0, 'Red Card': 3.0, 'Goal': 0.2}
+puntos_evento = {'Yellow Card': 1.0, 'Red Card': 3.0, 'Goal': 0.2, 'VAR review': 1.0}
 eventos['puntos'] = eventos['tipo_evento'].map(puntos_evento).fillna(0.0) # si no hubo ningun de esos eventos le asignamos un 0
 
 indice_partido = eventos.groupby('index_partido')['puntos'].sum().reset_index(name='indice_partido') # agrupamos segun id y suma la columna de puntos asignada previamente
 df_arbitros = partidos.merge(indice_partido, on='index_partido', how='left') # une la tabla de partidos original con la recien creada
 df_arbitros['indice_partido'] = df_arbitros['indice_partido'].fillna(0.0) # rellenamos los ausentes con 0 puntos
+
+if ronda is not None:
+    df_arbitros = df_arbitros[df_arbitros['ronda'] == ronda]
+
+if seleccion is not None:
+    df_arbitros = df_arbitros[(df_arbitros['seleccion_local'] == seleccion) | (df_arbitros['seleccion_visitante'] == seleccion)]
+
+
 
 df_puntos = df_arbitros[['arbitro_partido', 'indice_partido']].copy() # nos quedamos con las columnas de interes
 df_puntos['tipo'] = 'Partido' # estetico
@@ -219,8 +281,8 @@ df_grafico8 = pd.concat([df_puntos, media_arbitro], ignore_index=True) # concate
 
 fig8 = px.scatter(
     df_grafico8,
-    x='arbitro_partido',
-    y='valor',
+    x='valor',
+    y='arbitro_partido',
     color='tipo',
     title="Índice de Intervención Arbitral por Partido y Media",
     labels={'arbitro_partido': 'Árbitro', 'valor': 'Índice de Intervención'}
