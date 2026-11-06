@@ -269,9 +269,9 @@ if __name__ == '__main__':
     #print(partidos) # UNA VEZ TENEMOS TODA LA INFORMACION, VAMOS A BORRAR DUPLICADOS Y ANALIZAR NULOS
 
     
-    #print("Duplicados totales:", partidos.duplicated().sum()) # HEMOS OBTENIDO 100 DUPLICADOS TOTALES, ASI QUE LOS ELIMINAMOS
-    #partidos = partidos.drop_duplicates()
-    #print("Duplicados totales despues de limpieza:", partidos.duplicated().sum())
+    print("Duplicados totales:", partidos.duplicated().sum()) # HEMOS OBTENIDO 100 DUPLICADOS TOTALES, ASI QUE LOS ELIMINAMOS
+    partidos = partidos.drop_duplicates()
+    print("Duplicados totales despues de limpieza:", partidos.duplicated().sum())
 
     #Comprobamos si quedo algun valor nulo en alguna de las 13 columnas
     #print("Valores nulos por columna:")
