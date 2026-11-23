@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Secretos (API keys)
+.env
+*.key
+
+# Caché de las APIs y temporales de tests
+cache/
+tests/_tmp/
+
+# Office / sistema
+~$*
+.DS_Store
