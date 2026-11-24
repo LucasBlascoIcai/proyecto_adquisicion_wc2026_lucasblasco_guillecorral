@@ -60,6 +60,7 @@ AF_LIGA_AMISTOSOS = 10       # "Friendlies" (amistosos de selecciones) en API-Fo
 AF_TEMPORADAS = (2024, 2023) # el plan gratuito solo permite las temporadas 2022-2024
 AF_PAUSA = 6.5               # segundos entre llamadas (respeta el límite por minuto)
 AF_MAX_LLAMADAS = 95         # margen sobre las 100 llamadas/día del plan gratuito
+AF_MAX_PAGINA = 3            # el plan gratuito no permite pedir más allá de la página 3
 
 # OpenStreetMap
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
@@ -212,15 +213,21 @@ class ClienteAPIFootball:
         raise RuntimeError("API-Football no respondió tras varios reintentos.")
 
     def get_paginado(self, endpoint: str, params: dict, verbose: bool = True) -> list:
-        """Recorre todas las páginas (paging.current / paging.total) y une las respuestas."""
+        """Recorre las páginas (paging.current / paging.total) y une las respuestas.
+        El plan gratuito solo permite hasta la página 3: se para ahí y se devuelve lo obtenido."""
         resultados, pagina = [], 1
         while True:
-            datos = self.get(endpoint, {**params, "page": pagina})
+            try:
+                datos = self.get(endpoint, {**params, "page": pagina})
+            except PlanNoPermite:
+                if pagina == 1:
+                    raise
+                return resultados                     # límite de páginas del plan: nos quedamos con lo obtenido
             resultados.extend(datos.get("response", []))
             total = (datos.get("paging") or {}).get("total", 1) or 1
             if verbose:
                 print(f"   {endpoint} {params} · página {pagina}/{total} · llamadas reales: {self.llamadas}")
-            if pagina >= total:
+            if pagina >= min(total, AF_MAX_PAGINA):
                 return resultados
             pagina += 1
 

@@ -64,6 +64,12 @@ TEMPORADA_JUG = {}                                    # 2024 (85 %), 2023 (10 %)
 for x in api_players:
     r = random.random(); TEMPORADA_JUG[x["player"]["id"]] = 2024 if r < .85 else (2023 if r < .95 else None)
 ESTADO = {"restantes": 100, "llamadas": 0, "busquedas_cortas": 0}
+GRANDE = "Algeria"
+relleno = [{"player": {"id": 70000 + k, "name": f"Z. Relleno{k}", "firstname": "Zz", "lastname": f"Relleno{k}",
+            "birth": {"date": "2000-01-01"}, "nationality": GRANDE, "height": None, "weight": None},
+            "statistics": [{"team": {"id": 3, "name": GRANDE}}]} for k in range(50)]
+for x in relleno: TEMPORADA_JUG[x["player"]["id"]] = 2024
+api_players[:0] = relleno
 
 def fake_api_football(url, params):
     ESTADO["llamadas"] += 1; ESTADO["restantes"] -= 1
@@ -80,6 +86,8 @@ def fake_api_football(url, params):
         else:
             n = params["name"]; resp = [{"team": {"id": TEAM_ID[n], "name": n, "national": True}}] if n in TEAM_ID else []
         return Resp({"errors": [], "response": resp}, hdr)
+    if int(params.get("page", 1)) > 3:
+        return Resp({"errors": {"plan": "Free plans are limited to a maximum value of 3 for the Page parameter"}, "response": []}, hdr)
     if path.endswith("/players") and "team" in params:
         nom = next(n for n, i in TEAM_ID.items() if i == params["team"])
         lista = [x for x in api_players if x["statistics"][0]["team"]["name"] == nom and TEMPORADA_JUG[x["player"]["id"]] == int(season)]
