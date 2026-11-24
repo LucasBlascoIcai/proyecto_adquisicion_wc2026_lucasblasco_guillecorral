@@ -55,31 +55,50 @@ class Resp:
     def raise_for_status(self):
         if self.status_code >= 400: raise requests.HTTPError(self.status_code)
 
-ESTADO = {"restantes": 100, "plan_bloquea_liga": False, "llamadas": 0}
+# Simulación del plan gratuito real: temporadas 2022-2024, búsqueda >= 4 letras, 100 llamadas/día
+NOMBRES_API = sorted({p["statistics"][0]["team"]["name"] for p in api_players})
+TEAM_ID = {n: 500 + i for i, n in enumerate(NOMBRES_API)}
+FALTA_EN_AMISTOSOS = "Curacao"                       # obliga a usar /teams?name=...
+random.seed(7)
+TEMPORADA_JUG = {}                                    # 2024 (85 %), 2023 (10 %), ninguna (5 %)
+for x in api_players:
+    r = random.random(); TEMPORADA_JUG[x["player"]["id"]] = 2024 if r < .85 else (2023 if r < .95 else None)
+ESTADO = {"restantes": 100, "llamadas": 0, "busquedas_cortas": 0}
 
 def fake_api_football(url, params):
-    ESTADO["llamadas"] += 1
-    ESTADO["restantes"] -= 1
+    ESTADO["llamadas"] += 1; ESTADO["restantes"] -= 1
     hdr = {"x-ratelimit-requests-remaining": str(max(ESTADO["restantes"], 0))}
     if ESTADO["restantes"] < 0:
         return Resp({"errors": {"requests": "You have reached the request limit for the day"}, "response": []}, hdr)
-    path = urlparse(url).path
-    if path.endswith("/players") and "league" in params:
-        if ESTADO["plan_bloquea_liga"]:
-            return Resp({"errors": {"plan": "Free plans do not have access to this season, try from 2022 to 2024."}, "response": []}, hdr)
-        p = params["page"]; tot = int(np.ceil(len(api_players) / 20))
-        return Resp({"errors": [], "paging": {"current": p, "total": tot}, "response": api_players[(p-1)*20: p*20]}, hdr)
+    path = urlparse(url).path; season = params.get("season")
+    if season is not None and not 2022 <= int(season) <= 2024:
+        return Resp({"errors": {"plan": "Free plans do not have access to this season, try from 2022 to 2024."}, "response": []}, hdr)
+    if path.endswith("/teams"):
+        if "league" in params:
+            resp = [{"team": {"id": TEAM_ID[n], "name": n, "national": True}} for n in NOMBRES_API if n != FALTA_EN_AMISTOSOS]
+            resp += [{"team": {"id": 9999, "name": "Gibraltar", "national": True}}]
+        else:
+            n = params["name"]; resp = [{"team": {"id": TEAM_ID[n], "name": n, "national": True}}] if n in TEAM_ID else []
+        return Resp({"errors": [], "response": resp}, hdr)
+    if path.endswith("/players") and "team" in params:
+        nom = next(n for n, i in TEAM_ID.items() if i == params["team"])
+        lista = [x for x in api_players if x["statistics"][0]["team"]["name"] == nom and TEMPORADA_JUG[x["player"]["id"]] == int(season)]
+        p = params["page"]; tot = max(1, int(np.ceil(len(lista) / 20)))
+        return Resp({"errors": [], "paging": {"current": p, "total": tot}, "response": lista[(p-1)*20: p*20]}, hdr)
     if path.endswith("/players/profiles"):
+        if len(params["search"]) < 4:
+            ESTADO["busquedas_cortas"] += 1
+            return Resp({"errors": {"search": "The Search field must be at least 4 characters in length."}, "response": []}, hdr)
         q = b4.normalizar(params["search"])
         res = [{"player": x["player"]} for x in api_players if q in b4.normalizar(x["player"]["lastname"])][:250]
         return Resp({"errors": [], "paging": {"current": 1, "total": 1}, "response": res}, hdr)
-    raise AssertionError(url)
+    raise AssertionError((url, params))
 
 def patch(fn):
     def get(self, url, params=None, timeout=None): return fn(url, params or {})
     requests.Session.get = get
 
-def comprobar(df, nombre_test, esperado_min):
+def comprobar(df, nombre_test):
     ok = mal = 0
     for idx, (pid, birth, h, w) in verdad.items():
         f = df.at[idx, "fecha_nacimiento"]
@@ -87,48 +106,45 @@ def comprobar(df, nombre_test, esperado_min):
         if f.strftime("%Y-%m-%d") == birth: ok += 1
         else: mal += 1
     extra = sum(1 for i in df.index if i not in verdad and pd.notna(df.at[i, "fecha_nacimiento"]))
-    print(f"[{nombre_test}] correctos={ok}/{len(verdad)}  incorrectos={mal}  asignados a jugadores ausentes de la API={extra}")
+    print(f"[{nombre_test}] correctos={ok}/{len(verdad)}  incorrectos={mal}  asignados a ausentes de la API={extra}")
     assert mal == 0 and extra == 0, "Hay emparejamientos erróneos"
-    assert ok >= esperado_min, "Demasiados jugadores sin emparejar"
+    return ok
 
-b4.time.sleep = lambda s: None   # sin esperas en los tests
+b4.time.sleep = lambda s: None
 patch(fake_api_football)
-
-# --- Test 1: estrategia A (paginación por liga) ---
+ENTRADA = RAIZ / "datos" / "jugadoresWC26.xlsx"
 out = TMP / "jug_api.xlsx"
-df = b4.extraer_datos_jugadores((RAIZ / "datos" / "jugadoresWC26.xlsx"), out, "FAKE", pausa=0)
-comprobar(df, "A: liga", int(0.97 * len(verdad)))
-print("llamadas reales:", ESTADO["llamadas"])
-# formato del Excel de salida
+
+# --- Test 1: varios días hasta completar (día 1 con solo 48 llamadas, como en la ejecución real) ---
+encontrados, dia = [], 0
+ESTADO["restantes"] = 48
+while True:
+    dia += 1
+    antes = ESTADO["llamadas"]
+    df = b4.extraer_datos_jugadores(ENTRADA, out, "FAKE", pausa=0, max_llamadas=95)
+    n = comprobar(df, f"día {dia}")
+    print(f"   llamadas reales ese día: {ESTADO['llamadas'] - antes}")
+    assert ESTADO["llamadas"] - antes <= 96
+    encontrados.append(n)
+    if dia > 1 and encontrados[-1] == encontrados[-2]: break
+    ESTADO["restantes"] = 100
+    assert dia < 25
+assert ESTADO["busquedas_cortas"] == 0, "Se enviaron búsquedas de menos de 4 letras"
+print("Días necesarios:", dia - 1, "· encontrados por día:", encontrados)
+assert encontrados[-1] >= 0.97 * len(verdad)
+
 x = pd.read_excel(out)
 assert list(x.columns[-3:]) == ["fecha_nacimiento", "altura_jugador", "peso_jugador"]
-assert (x["fecha_nacimiento"] == "No disponible").sum() > 0 and (x["altura_jugador"] == "No disponible").sum() > 0
-print(x[["nombre_jugador", "fecha_nacimiento", "altura_jugador", "peso_jugador"]].head(4).to_string())
+assert (x["fecha_nacimiento"] == "No disponible").sum() > 0
 rt = b4.leer_jugadores_api(out)
 assert rt["fecha_nacimiento"].dtype.kind == "M" and rt["altura_jugador"].dtype.kind == "f"
-# alturas correctas
 mal_h = sum(1 for i,(pid,b,h,w) in verdad.items() if h and pd.notna(rt.at[i,"altura_jugador"]) and rt.at[i,"altura_jugador"] != int(h.split()[0]))
-assert mal_h == 0; print("Alturas OK")
+assert mal_h == 0; print("Formato de salida y alturas OK")
 
-# --- Test 2: segunda ejecución -> todo desde caché, 0 llamadas ---
-antes = ESTADO["llamadas"]
-b4.extraer_datos_jugadores((RAIZ / "datos" / "jugadoresWC26.xlsx"), out, "FAKE", pausa=0, busqueda_individual=False)
-assert ESTADO["llamadas"] == antes; print("Caché OK: 0 llamadas en la segunda ejecución")
-
-# --- Test 3: plan no permite la temporada -> búsqueda individual con cuota limitada y reanudación ---
-shutil.rmtree(b4.DIR_CACHE); ESTADO.update(restantes=100, plan_bloquea_liga=True, llamadas=0)
-df3 = b4.extraer_datos_jugadores((RAIZ / "datos" / "jugadoresWC26.xlsx"), out, "FAKE", pausa=0, max_llamadas=95)
-n1 = df3["fecha_nacimiento"].notna().sum()
-print("Día 1 con plan bloqueado: encontrados", n1, "· llamadas", ESTADO["llamadas"])
-assert ESTADO["llamadas"] <= 96
-ESTADO.update(restantes=100)   # "al día siguiente"
-df3b = b4.extraer_datos_jugadores((RAIZ / "datos" / "jugadoresWC26.xlsx"), out, "FAKE", pausa=0, max_llamadas=95)
-n2 = df3b["fecha_nacimiento"].notna().sum()
-print("Día 2: encontrados", n2)
-assert n2 > n1
-ok = sum(1 for i,(pid,b,h,w) in verdad.items() if pd.notna(df3b.at[i,"fecha_nacimiento"]) and df3b.at[i,"fecha_nacimiento"].strftime("%Y-%m-%d") != b)
-extra = sum(1 for i in df3b.index if i not in verdad and pd.notna(df3b.at[i,"fecha_nacimiento"]))
-print("Búsqueda individual: erróneos", ok, "· asignados a ausentes", extra); assert ok == 0 and extra == 0
+# --- Test 2: ejecución extra -> todo desde caché, 0 llamadas ---
+antes = ESTADO["llamadas"]; ESTADO["restantes"] = 100
+b4.extraer_datos_jugadores(ENTRADA, out, "FAKE", pausa=0)
+assert ESTADO["llamadas"] == antes; print("Caché OK: 0 llamadas en la ejecución extra")
 
 # --- Test 4: OSM ---
 COORD = {"Estadio Azteca": (19.3029, -99.1505), "Estadio Akron": (20.6817, -103.4626), "Estadio BBVA": (25.6692, -100.2446),

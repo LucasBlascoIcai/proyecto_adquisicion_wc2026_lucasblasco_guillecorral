@@ -56,8 +56,8 @@ NO_DISPONIBLE = "No disponible"
 
 # API-Football
 AF_URL = "https://v3.football.api-sports.io"
-AF_LIGA_MUNDIAL = 1          # id de la "World Cup" en API-Football
-AF_TEMPORADA = 2026
+AF_LIGA_AMISTOSOS = 10       # "Friendlies" (amistosos de selecciones) en API-Football
+AF_TEMPORADAS = (2024, 2023) # el plan gratuito solo permite las temporadas 2022-2024
 AF_PAUSA = 6.5               # segundos entre llamadas (respeta el límite por minuto)
 AF_MAX_LLAMADAS = 95         # margen sobre las 100 llamadas/día del plan gratuito
 
@@ -211,14 +211,15 @@ class ClienteAPIFootball:
             return datos
         raise RuntimeError("API-Football no respondió tras varios reintentos.")
 
-    def get_paginado(self, endpoint: str, params: dict) -> list:
+    def get_paginado(self, endpoint: str, params: dict, verbose: bool = True) -> list:
         """Recorre todas las páginas (paging.current / paging.total) y une las respuestas."""
         resultados, pagina = [], 1
         while True:
             datos = self.get(endpoint, {**params, "page": pagina})
             resultados.extend(datos.get("response", []))
             total = (datos.get("paging") or {}).get("total", 1) or 1
-            print(f"   {endpoint} {params} · página {pagina}/{total} · llamadas reales: {self.llamadas}")
+            if verbose:
+                print(f"   {endpoint} {params} · página {pagina}/{total} · llamadas reales: {self.llamadas}")
             if pagina >= total:
                 return resultados
             pagina += 1
@@ -278,6 +279,13 @@ def puntuacion_nombre(nuestro: str, cand: dict) -> float:
     t_nuestro = tokens_nombre(nuestro)
     if not t_nuestro:
         return 0.0
+    # Mismo apellido pero distinto nombre de pila (p. ej. 'Ousmane Diomande' vs 'Yan Diomande',
+    # o 'Ahmed Mohammad' vs 'Ali Hasan Mohammad'): se decide con el nombre COMPLETO de la API,
+    # porque el nombre corto ('A. Mohammad') solo trae la inicial y casaría con cualquiera.
+    t_comp = tokens_nombre(cand["nombre_completo"])
+    penaliza = (len(t_comp) > 1 and len(t_nuestro) > 1 and len(t_comp[0]) > 1 and len(t_nuestro[0]) > 1
+                and not any(_token_coincide(t_comp[0], b) for b in t_nuestro)
+                and not any(_token_coincide(t_nuestro[0], a) for a in t_comp))
     mejor = 0.0
     for texto in (cand["nombre_completo"], cand["nombre"]):
         t_api = tokens_nombre(texto)
@@ -290,14 +298,8 @@ def puntuacion_nombre(nuestro: str, cand: dict) -> float:
         cob_nuestro = sum(any(_token_coincide(b, a) for a in t_api) for b in t_nuestro) / len(t_nuestro)
         secuencia = SequenceMatcher(None, " ".join(t_nuestro), " ".join(t_api)).ratio()
         punt = 0.7 * (cob_api + cob_nuestro) / 2 + 0.3 * secuencia
-        # Mismo apellido pero distinto nombre de pila (p. ej. 'Ousmane Diomande' vs 'Yan Diomande'):
-        # si ambos nombres de pila están completos y no aparecen en el otro nombre, se penaliza
-        if (len(t_api) > 1 and len(t_nuestro) > 1 and len(t_api[0]) > 1 and len(t_nuestro[0]) > 1
-                and not any(_token_coincide(t_api[0], b) for b in t_nuestro)
-                and not any(_token_coincide(t_nuestro[0], a) for a in t_api)):
-            punt *= 0.6
         mejor = max(mejor, punt)
-    return mejor
+    return mejor * 0.6 if penaliza else mejor
 
 
 def mapear_selecciones(nuestras: list, de_api: list) -> dict:
@@ -313,6 +315,24 @@ def mapear_selecciones(nuestras: list, de_api: list) -> dict:
                 encontrado = norm_api[mejor]
         mapa[sel] = encontrado
     return mapa
+
+
+def asignar_voraz(grupo: pd.DataFrame, pool: list, umbral: float, usados: set) -> dict:
+    """Asigna jugadores de 'grupo' a candidatos de 'pool' de mayor a menor puntuación.
+    Cada candidato se usa una sola vez ('usados' se actualiza en el sitio)."""
+    por_id = {c["id"]: c for c in pool}
+    pares = sorted(
+        ((puntuacion_nombre(nom, c), idx, c["id"]) for idx, nom in grupo["nombre_jugador"].items() for c in pool),
+        key=lambda x: x[0], reverse=True,
+    )
+    res = {}
+    for punt, idx, cid in pares:
+        if punt < umbral:
+            break
+        if idx not in res and cid not in usados:
+            res[idx] = por_id[cid]
+            usados.add(cid)
+    return res
 
 
 def emparejar(jugadores: pd.DataFrame, candidatos: list, umbral: float = 0.6, umbral_global: float = 0.85) -> dict:
@@ -336,16 +356,7 @@ def emparejar(jugadores: pd.DataFrame, candidatos: list, umbral: float = 0.6, um
         if equipo_api is None:
             continue
         pool = df_c[(df_c["equipo"] == equipo_api) | (df_c["nacionalidad"] == equipo_api)].to_dict("records")
-        pares = sorted(
-            ((puntuacion_nombre(nom, c), idx, c["id"]) for idx, nom in grupo["nombre_jugador"].items() for c in pool),
-            reverse=True,
-        )
-        for punt, idx, cid in pares:
-            if punt < umbral:
-                break
-            if idx not in asignados and cid not in usados:
-                asignados[idx] = cand_por_id[cid]
-                usados.add(cid)
+        asignados.update(asignar_voraz(grupo, pool, umbral, usados))
 
     libres = [c for c in cand_por_id.values() if c["id"] not in usados]
     for idx, nom in jugadores["nombre_jugador"].items():
@@ -361,44 +372,97 @@ def emparejar(jugadores: pd.DataFrame, candidatos: list, umbral: float = 0.6, um
 
 # ---------- 2.3 Proceso completo ----------
 
+def obtener_ids_selecciones(cliente: "ClienteAPIFootball", selecciones: list) -> dict:
+    """Devuelve {selección: id_equipo_API}.
+
+    1) Una sola llamada a /teams?league=10&season=2024 (amistosos internacionales)
+       devuelve casi todas las selecciones del mundo con su id.
+    2) Las que no aparezcan se buscan por nombre con /teams?name=... (1 llamada cada una).
+    """
+    ids = {}
+    try:
+        datos = cliente.get("teams", {"league": AF_LIGA_AMISTOSOS, "season": AF_TEMPORADAS[0]})
+        nacionales = {t["team"]["name"]: t["team"]["id"]
+                      for t in datos.get("response", []) if (t.get("team") or {}).get("national")}
+        mapa = mapear_selecciones(selecciones, list(nacionales))
+        ids = {sel: nacionales[nom] for sel, nom in mapa.items() if nom is not None}
+    except (PlanNoPermite, RuntimeError) as e:
+        print(f"   ! No se pudo obtener la lista de selecciones: {e}")
+    for sel in selecciones:
+        if sel in ids:
+            continue
+        for nombre in ALIAS_SELECCIONES.get(sel, []) + [sel]:
+            try:
+                datos = cliente.get("teams", {"name": nombre})
+            except (PlanNoPermite, RuntimeError):
+                continue
+            nac = [t["team"] for t in datos.get("response", []) if (t.get("team") or {}).get("national")]
+            if nac:
+                ids[sel] = nac[0]["id"]
+                break
+    return ids
+
+
 def extraer_datos_jugadores(ruta_entrada: Path, ruta_salida: Path, api_key: str,
-                            liga: int = AF_LIGA_MUNDIAL, temporada: int = AF_TEMPORADA,
+                            temporadas: tuple = AF_TEMPORADAS,
                             max_llamadas: int = AF_MAX_LLAMADAS, pausa: float = AF_PAUSA,
                             busqueda_individual: bool = True) -> pd.DataFrame:
     """Añade fecha_nacimiento, altura_jugador y peso_jugador al DataFrame de jugadores.
 
-    Estrategia para gastar el mínimo de llamadas:
-      A) /players?league=1&season=2026 devuelve 20 jugadores por llamada con su
-         fecha de nacimiento, altura y peso -> ~65 llamadas para todo el Mundial
-         (frente a ~1250 si se consultara jugador a jugador).
-      B) Solo para los que no se hayan encontrado: /players/profiles?search=apellido
-         (1 llamada por jugador) hasta agotar el presupuesto de llamadas. Lo que
-         falte se completa en ejecuciones posteriores gracias a la caché.
+    El plan gratuito de API-Football solo permite las temporadas 2022-2024, así que
+    no se puede pedir la plantilla del Mundial 2026 directamente. Estrategia:
+      A) Para cada selección: /players?team=ID&season=2024 devuelve (20 por llamada)
+         los jugadores que la selección utilizó ese año, con fecha de nacimiento,
+         altura y peso. Si faltan jugadores, se repite con la temporada 2023.
+         -> unas 2-3 llamadas por selección (frente a ~26 jugador a jugador).
+      B) Solo para los que sigan sin encontrarse: /players/profiles?search=apellido
+         (1 llamada por jugador).
+    Con 100 llamadas/día no da tiempo en un solo día: la caché guarda cada respuesta,
+    así que basta con volver a ejecutar el script al día siguiente para continuar.
     """
     jugadores = pd.read_excel(ruta_entrada)
     cliente = ClienteAPIFootball(api_key, max_llamadas=max_llamadas, pausa=pausa)
-    candidatos, asignados = [], {}
+    asignados, usados, cuota_agotada = {}, set(), False
+    selecciones = sorted(jugadores["seleccion_nacional"].unique())
 
-    # --- Estrategia A: paginación por competición ---
-    print(f"[A] Descargando jugadores de la liga {liga}, temporada {temporada}...")
+    # --- Estrategia A: jugadores de cada selección por temporada ---
+    print(f"[A] Jugadores de cada selección (temporadas {', '.join(map(str, temporadas))})...")
     try:
-        candidatos = [a_candidato(x) for x in cliente.get_paginado("players", {"league": liga, "season": temporada})]
-    except PlanNoPermite as e:
-        print(f"   ! El plan no permite esta consulta: {e}\n   -> Se pasa a la búsqueda individual.")
+        ids = obtener_ids_selecciones(cliente, selecciones)
+        print(f"   Selecciones identificadas en la API: {len(ids)}/{len(selecciones)}")
+        for sel in selecciones:
+            if sel not in ids:
+                print(f"   ! {sel}: no encontrada en la API")
+                continue
+            grupo_total = jugadores[jugadores["seleccion_nacional"] == sel]
+            for temporada in temporadas:
+                grupo = grupo_total[~grupo_total.index.isin(list(asignados))]
+                if grupo.empty:
+                    break
+                try:
+                    pool = [a_candidato(x) for x in cliente.get_paginado(
+                        "players", {"team": ids[sel], "season": temporada}, verbose=False)]
+                except (PlanNoPermite, RuntimeError) as e:
+                    print(f"   ! {sel} {temporada}: {e}")
+                    continue
+                pool = [c for c in {c["id"]: c for c in pool}.values() if c["id"] not in usados]
+                asignados.update(asignar_voraz(grupo, pool, 0.6, usados))
+            n_ok = int(grupo_total.index.isin(list(asignados)).sum())
+            print(f"   {sel:<24} {n_ok:>2}/{len(grupo_total)} · llamadas reales hoy: {cliente.llamadas}")
     except CuotaAgotada as e:
-        print(f"   ! {e}")
-    asignados = emparejar(jugadores, candidatos)
+        cuota_agotada = True
+        print(f"   ! {e}\n   -> Vuelva a ejecutar mañana: la caché conserva lo ya descargado.")
     print(f"   Emparejados {len(asignados)}/{len(jugadores)} jugadores con la estrategia A.")
 
     # --- Estrategia B: búsqueda individual de los que faltan ---
-    if busqueda_individual:
+    if busqueda_individual and not cuota_agotada:
         pendientes = [i for i in jugadores.index if i not in asignados]
         print(f"[B] Búsqueda individual de {len(pendientes)} jugadores pendientes...")
         for idx in pendientes:
             nombre = jugadores.at[idx, "nombre_jugador"]
-            toks = [t for t in tokens_nombre(nombre) if len(t) >= 3]
+            toks = [t for t in tokens_nombre(nombre) if len(t) >= 4]   # la API exige ≥4 letras
             if not toks:
-                continue                                       # p. ej. 'Mc': la API exige ≥3 letras
+                continue                                                # p. ej. 'Mc'
             try:
                 datos = cliente.get("players/profiles", {"search": toks[-1]})
             except CuotaAgotada as e:
@@ -407,11 +471,14 @@ def extraer_datos_jugadores(ruta_entrada: Path, ruta_salida: Path, api_key: str,
             except PlanNoPermite as e:
                 print(f"   ! {e}")
                 break
-            ya_usados = {c["id"] for c in asignados.values()}
-            cand = [c for c in (a_candidato(x) for x in datos.get("response", [])) if c["id"] not in ya_usados]
+            except RuntimeError as e:                                   # un jugador no detiene el proceso
+                print(f"   ! {nombre}: {e}")
+                continue
+            cand = [c for c in (a_candidato(x) for x in datos.get("response", [])) if c["id"] not in usados]
             res = emparejar(jugadores.loc[[idx]], cand, umbral=0.7, umbral_global=0.9)
             if idx in res:
                 asignados[idx] = res[idx]
+                usados.add(res[idx]["id"])
 
     # --- Volcado de resultados en el DataFrame original ---
     jugadores["fecha_nacimiento"] = pd.NaT
@@ -787,8 +854,8 @@ def main(argv=None) -> None:
     pj.add_argument("--salida", type=Path, default=F_JUGADORES_API)
     pj.add_argument("--api-key", default=os.getenv("APIFOOTBALL_KEY"),
                     help="Clave de API-Football (por defecto, variable de entorno APIFOOTBALL_KEY)")
-    pj.add_argument("--liga", type=int, default=AF_LIGA_MUNDIAL)
-    pj.add_argument("--temporada", type=int, default=AF_TEMPORADA)
+    pj.add_argument("--temporadas", type=int, nargs="+", default=list(AF_TEMPORADAS),
+                    help="Temporadas a consultar por selección (plan gratuito: 2022-2024)")
     pj.add_argument("--max-llamadas", type=int, default=AF_MAX_LLAMADAS)
     pj.add_argument("--sin-busqueda-individual", action="store_true",
                     help="No usar /players/profiles para los jugadores no encontrados")
@@ -802,8 +869,8 @@ def main(argv=None) -> None:
     if args.modo == "jugadores":
         if not args.api_key:
             parser.error("Falta la clave: use --api-key o la variable de entorno APIFOOTBALL_KEY")
-        extraer_datos_jugadores(args.entrada, args.salida, args.api_key, liga=args.liga,
-                                temporada=args.temporada, max_llamadas=args.max_llamadas,
+        extraer_datos_jugadores(args.entrada, args.salida, args.api_key,
+                                temporadas=tuple(args.temporadas), max_llamadas=args.max_llamadas,
                                 busqueda_individual=not args.sin_busqueda_individual)
     elif args.modo == "estadios":
         if not args.entrada.exists():

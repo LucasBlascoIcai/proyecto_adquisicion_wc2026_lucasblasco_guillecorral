@@ -29,7 +29,7 @@ pip install -r requirements.txt
 ```bash
 # 1) Jugadores (API-Football). La clave está en dashboard.api-football.com > Account > My Access
 export APIFOOTBALL_KEY="tu_clave"          # Windows (PowerShell): $env:APIFOOTBALL_KEY="tu_clave"
-python bloque4_WC26.py jugadores
+python bloque4_WC26.py jugadores    # repetir cada día hasta completar (usa la caché)
 
 # 2) Estadios (OpenStreetMap, sin clave)
 python bloque4_WC26.py estadios
@@ -41,15 +41,24 @@ streamlit run bloque4_WC26.py
 python tests/test_bloque4.py
 ```
 
-Opciones útiles: `--temporada`, `--liga`, `--max-llamadas`, `--entrada`, `--salida` (ver `--help`).
+Opciones útiles: `--temporadas`, `--max-llamadas`, `--entrada`, `--salida` (ver `--help`).
 
 ## Decisiones técnicas
 
-**API-Football: límite de 100 llamadas/día.** En lugar de consultar jugador a jugador (~1.250 llamadas),
-se usa `GET /players?league=1&season=2026`, que devuelve 20 jugadores por llamada con fecha de
-nacimiento, altura y peso: unas 65 llamadas para todo el Mundial. Los jugadores que no aparezcan se
-buscan individualmente con `GET /players/profiles?search=apellido` hasta agotar el presupuesto
-(`--max-llamadas`, 95 por defecto).
+**API-Football: plan gratuito (100 llamadas/día y solo temporadas 2022-2024).** La API no permite
+consultar la temporada 2026 con el plan gratuito (`"Free plans do not have access to this season, try
+from 2022 to 2024"`), así que no se puede descargar directamente la plantilla del Mundial. Además,
+consultar jugador a jugador costaría ~1.250 llamadas (13 días). Solución:
+
+1. `GET /teams?league=10&season=2024` (amistosos internacionales): **1 llamada** devuelve el id de casi
+   todas las selecciones. Las que falten se buscan con `GET /teams?name=...`.
+2. `GET /players?team={id}&season=2024`: jugadores que utilizó cada selección en 2024, 20 por llamada,
+   con fecha de nacimiento, altura y peso (unas 2-3 llamadas por selección). Si faltan jugadores, se
+   repite con la temporada 2023. La fecha de nacimiento, la altura y el peso no dependen de la temporada.
+3. Los que sigan sin encontrarse: `GET /players/profiles?search=apellido` (1 llamada por jugador; la API
+   exige al menos 4 letras).
+
+El proceso completo necesita unas 3 ejecuciones (una por día).
 
 - **Caché en disco:** cada respuesta válida se guarda en `cache/`. Repetir la ejecución no gasta llamadas.
   Si se agota la cuota, al día siguiente se continúa donde se quedó.
