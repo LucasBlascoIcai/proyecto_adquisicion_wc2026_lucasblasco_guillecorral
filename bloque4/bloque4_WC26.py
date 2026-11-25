@@ -61,6 +61,7 @@ AF_TEMPORADAS = (2024, 2023) # el plan gratuito solo permite las temporadas 2022
 AF_PAUSA = 6.5               # segundos entre llamadas (respeta el límite por minuto)
 AF_MAX_LLAMADAS = 95         # margen sobre las 100 llamadas/día del plan gratuito
 AF_MAX_PAGINA = 3            # el plan gratuito no permite pedir más allá de la página 3
+AF_UMBRAL = 0.65            # puntuación mínima para dar por bueno un emparejamiento de nombres
 
 # OpenStreetMap
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
@@ -264,8 +265,32 @@ def a_candidato(item: dict) -> dict:
 PARTICULAS = {"de", "da", "do", "dos", "das", "del", "la", "van", "der", "den", "von", "el", "al", "bin", "ben", "e", "y"}
 
 
+# Apellido en mayúsculas pegado al nombre, como en los Excel de la solución: 'GUIMARAESBruno' -> 'GUIMARAES Bruno'
+PATRON_PEGADO = re.compile(r"([A-ZÁÉÍÓÚÑÇÃÕÂÊÔÜ]{2,})(?=[A-ZÁÉÍÓÚÑÇÃÕÂÊÔÜ][a-záéíóúñçãõâêôü])")
+
+
 def tokens_nombre(nombre: str) -> list:
+    nombre = PATRON_PEGADO.sub(r"\1 ", str(nombre))
     return [t for t in normalizar(nombre).split() if t not in PARTICULAS]
+
+
+def _con_uniones(tokens: list) -> list:
+    """Añade las uniones de tokens consecutivos: ['ali', 'reza'] -> [..., 'alireza']."""
+    return tokens + [a + b for a, b in zip(tokens, tokens[1:]) if len(a) > 1 and len(b) > 1]
+
+
+def _union_coincide(a: str, b: str) -> bool:
+    """Comparación estricta para nombres unidos ('alireza' ~ 'ali'+'reza')."""
+    return a == b or (min(len(a), len(b)) >= 6 and SequenceMatcher(None, a, b).ratio() >= 0.9)
+
+
+def _cubierto(tok: str, propias: list, otro: list, otro_uniones: list) -> bool:
+    """¿Está 'tok' (de un nombre) presente en el otro nombre?"""
+    if any(_token_coincide(tok, b) for b in otro):
+        return True
+    if len(tok) > 1 and any(_union_coincide(tok, x) for x in otro_uniones):
+        return True                                   # 'alireza' frente a 'ali' + 'reza'
+    return any(tok in x and _union_coincide(x, b) for x in propias for b in otro + otro_uniones)
 
 
 def _token_coincide(a: str, b: str) -> bool:
@@ -273,7 +298,17 @@ def _token_coincide(a: str, b: str) -> bool:
         return a[0] == b[0]
     if a == b:
         return True
-    return min(len(a), len(b)) >= 4 and SequenceMatcher(None, a, b).ratio() >= 0.85
+    if min(len(a), len(b)) < 4:
+        return False
+    # Transliteraciones ('saeid'/'saeed', 'mahdi'/'mehdi', 'arya'/'aria'): misma inicial y misma
+    # longitud -> más tolerante. Con distinta longitud ('alvaro'/'alvarez') se exige más parecido.
+    if a[0] != b[0]:
+        umbral = 0.9
+    elif len(a) == len(b):
+        umbral = 0.75
+    else:
+        umbral = 0.85
+    return SequenceMatcher(None, a, b).ratio() >= umbral
 
 
 def puntuacion_nombre(nuestro: str, cand: dict) -> float:
@@ -290,19 +325,25 @@ def puntuacion_nombre(nuestro: str, cand: dict) -> float:
     # o 'Ahmed Mohammad' vs 'Ali Hasan Mohammad'): se decide con el nombre COMPLETO de la API,
     # porque el nombre corto ('A. Mohammad') solo trae la inicial y casaría con cualquiera.
     t_comp = tokens_nombre(cand["nombre_completo"])
+    u_nuestro = _con_uniones(t_nuestro)
     penaliza = (len(t_comp) > 1 and len(t_nuestro) > 1 and len(t_comp[0]) > 1 and len(t_nuestro[0]) > 1
-                and not any(_token_coincide(t_comp[0], b) for b in t_nuestro)
-                and not any(_token_coincide(t_nuestro[0], a) for a in t_comp))
+                and not any(_token_coincide(t_comp[0], b) or b.startswith(t_comp[0]) for b in u_nuestro)
+                and not any(_token_coincide(t_nuestro[0], a) or a.startswith(t_nuestro[0])
+                            for a in _con_uniones(t_comp)))
     mejor = 0.0
     for texto in (cand["nombre_completo"], cand["nombre"]):
         t_api = tokens_nombre(texto)
         if not t_api:
             continue
         # al menos un token "real" (no inicial) debe coincidir: evita casar solo por iniciales
-        if not any(len(a) > 1 and any(_token_coincide(a, b) for b in t_nuestro if len(b) > 1) for a in t_api):
+        un_api = _con_uniones(t_api)[len(t_api):]          # solo las uniones
+        un_nuestro = u_nuestro[len(t_nuestro):]
+        # al menos un token "real" (no inicial) debe coincidir: evita casar solo por iniciales
+        if not any(len(a) > 1 and _cubierto(a, un_api, [b for b in t_nuestro if len(b) > 1], un_nuestro)
+                   for a in t_api):
             continue
-        cob_api = sum(any(_token_coincide(a, b) for b in t_nuestro) for a in t_api) / len(t_api)
-        cob_nuestro = sum(any(_token_coincide(b, a) for a in t_api) for b in t_nuestro) / len(t_nuestro)
+        cob_api = sum(_cubierto(a, un_api, t_nuestro, un_nuestro) for a in t_api) / len(t_api)
+        cob_nuestro = sum(_cubierto(b, un_nuestro, t_api, un_api) for b in t_nuestro) / len(t_nuestro)
         secuencia = SequenceMatcher(None, " ".join(t_nuestro), " ".join(t_api)).ratio()
         punt = 0.7 * (cob_api + cob_nuestro) / 2 + 0.3 * secuencia
         mejor = max(mejor, punt)
@@ -453,7 +494,7 @@ def extraer_datos_jugadores(ruta_entrada: Path, ruta_salida: Path, api_key: str,
                     print(f"   ! {sel} {temporada}: {e}")
                     continue
                 pool = [c for c in {c["id"]: c for c in pool}.values() if c["id"] not in usados]
-                asignados.update(asignar_voraz(grupo, pool, 0.6, usados))
+                asignados.update(asignar_voraz(grupo, pool, AF_UMBRAL, usados))
             n_ok = int(grupo_total.index.isin(list(asignados)).sum())
             print(f"   {sel:<24} {n_ok:>2}/{len(grupo_total)} · llamadas reales hoy: {cliente.llamadas}")
     except CuotaAgotada as e:
