@@ -1,5 +1,5 @@
 """Pruebas del Bloque 4 con APIs simuladas (mismo formato JSON que las reales)."""
-import importlib.util, json, random, shutil, sys, unicodedata
+import importlib.util, random, shutil, sys, unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
 import numpy as np, pandas as pd, requests
@@ -55,31 +55,58 @@ class Resp:
     def raise_for_status(self):
         if self.status_code >= 400: raise requests.HTTPError(self.status_code)
 
-ESTADO = {"restantes": 100, "plan_bloquea_liga": False, "llamadas": 0}
+# Simulación del plan gratuito real: temporadas 2022-2024, búsqueda >= 4 letras, 100 llamadas/día
+NOMBRES_API = sorted({p["statistics"][0]["team"]["name"] for p in api_players})
+TEAM_ID = {n: 500 + i for i, n in enumerate(NOMBRES_API)}
+FALTA_EN_AMISTOSOS = "Curacao"                       # obliga a usar /teams?name=...
+random.seed(7)
+TEMPORADA_JUG = {}                                    # 2024 (85 %), 2023 (10 %), ninguna (5 %)
+for x in api_players:
+    r = random.random(); TEMPORADA_JUG[x["player"]["id"]] = 2024 if r < .85 else (2023 if r < .95 else None)
+ESTADO = {"restantes": 100, "llamadas": 0, "busquedas_cortas": 0}
+GRANDE = "Algeria"
+relleno = [{"player": {"id": 70000 + k, "name": f"Z. Relleno{k}", "firstname": "Zz", "lastname": f"Relleno{k}",
+            "birth": {"date": "2000-01-01"}, "nationality": GRANDE, "height": None, "weight": None},
+            "statistics": [{"team": {"id": 3, "name": GRANDE}}]} for k in range(50)]
+for x in relleno: TEMPORADA_JUG[x["player"]["id"]] = 2024
+api_players[:0] = relleno
 
 def fake_api_football(url, params):
-    ESTADO["llamadas"] += 1
-    ESTADO["restantes"] -= 1
+    ESTADO["llamadas"] += 1; ESTADO["restantes"] -= 1
     hdr = {"x-ratelimit-requests-remaining": str(max(ESTADO["restantes"], 0))}
     if ESTADO["restantes"] < 0:
         return Resp({"errors": {"requests": "You have reached the request limit for the day"}, "response": []}, hdr)
-    path = urlparse(url).path
-    if path.endswith("/players") and "league" in params:
-        if ESTADO["plan_bloquea_liga"]:
-            return Resp({"errors": {"plan": "Free plans do not have access to this season, try from 2022 to 2024."}, "response": []}, hdr)
-        p = params["page"]; tot = int(np.ceil(len(api_players) / 20))
-        return Resp({"errors": [], "paging": {"current": p, "total": tot}, "response": api_players[(p-1)*20: p*20]}, hdr)
+    path = urlparse(url).path; season = params.get("season")
+    if season is not None and not 2022 <= int(season) <= 2024:
+        return Resp({"errors": {"plan": "Free plans do not have access to this season, try from 2022 to 2024."}, "response": []}, hdr)
+    if path.endswith("/teams"):
+        if "league" in params:
+            resp = [{"team": {"id": TEAM_ID[n], "name": n, "national": True}} for n in NOMBRES_API if n != FALTA_EN_AMISTOSOS]
+            resp += [{"team": {"id": 9999, "name": "Gibraltar", "national": True}}]
+        else:
+            n = params["name"]; resp = [{"team": {"id": TEAM_ID[n], "name": n, "national": True}}] if n in TEAM_ID else []
+        return Resp({"errors": [], "response": resp}, hdr)
+    if int(params.get("page", 1)) > 3:
+        return Resp({"errors": {"plan": "Free plans are limited to a maximum value of 3 for the Page parameter"}, "response": []}, hdr)
+    if path.endswith("/players") and "team" in params:
+        nom = next(n for n, i in TEAM_ID.items() if i == params["team"])
+        lista = [x for x in api_players if x["statistics"][0]["team"]["name"] == nom and TEMPORADA_JUG[x["player"]["id"]] == int(season)]
+        p = params["page"]; tot = max(1, int(np.ceil(len(lista) / 20)))
+        return Resp({"errors": [], "paging": {"current": p, "total": tot}, "response": lista[(p-1)*20: p*20]}, hdr)
     if path.endswith("/players/profiles"):
+        if len(params["search"]) < 4:
+            ESTADO["busquedas_cortas"] += 1
+            return Resp({"errors": {"search": "The Search field must be at least 4 characters in length."}, "response": []}, hdr)
         q = b4.normalizar(params["search"])
         res = [{"player": x["player"]} for x in api_players if q in b4.normalizar(x["player"]["lastname"])][:250]
         return Resp({"errors": [], "paging": {"current": 1, "total": 1}, "response": res}, hdr)
-    raise AssertionError(url)
+    raise AssertionError((url, params))
 
 def patch(fn):
     def get(self, url, params=None, timeout=None): return fn(url, params or {})
     requests.Session.get = get
 
-def comprobar(df, nombre_test, esperado_min):
+def comprobar(df, nombre_test):
     ok = mal = 0
     for idx, (pid, birth, h, w) in verdad.items():
         f = df.at[idx, "fecha_nacimiento"]
@@ -87,48 +114,45 @@ def comprobar(df, nombre_test, esperado_min):
         if f.strftime("%Y-%m-%d") == birth: ok += 1
         else: mal += 1
     extra = sum(1 for i in df.index if i not in verdad and pd.notna(df.at[i, "fecha_nacimiento"]))
-    print(f"[{nombre_test}] correctos={ok}/{len(verdad)}  incorrectos={mal}  asignados a jugadores ausentes de la API={extra}")
+    print(f"[{nombre_test}] correctos={ok}/{len(verdad)}  incorrectos={mal}  asignados a ausentes de la API={extra}")
     assert mal == 0 and extra == 0, "Hay emparejamientos erróneos"
-    assert ok >= esperado_min, "Demasiados jugadores sin emparejar"
+    return ok
 
-b4.time.sleep = lambda s: None   # sin esperas en los tests
+b4.time.sleep = lambda s: None
 patch(fake_api_football)
-
-# --- Test 1: estrategia A (paginación por liga) ---
+ENTRADA = RAIZ / "datos" / "jugadoresWC26.xlsx"
 out = TMP / "jug_api.xlsx"
-df = b4.extraer_datos_jugadores((RAIZ / "datos" / "jugadoresWC26.xlsx"), out, "FAKE", pausa=0)
-comprobar(df, "A: liga", int(0.97 * len(verdad)))
-print("llamadas reales:", ESTADO["llamadas"])
-# formato del Excel de salida
+
+# --- Test 1: varios días hasta completar (día 1 con solo 48 llamadas, como en la ejecución real) ---
+encontrados, dia = [], 0
+ESTADO["restantes"] = 48
+while True:
+    dia += 1
+    antes = ESTADO["llamadas"]
+    df = b4.extraer_datos_jugadores(ENTRADA, out, "FAKE", pausa=0, max_llamadas=95)
+    n = comprobar(df, f"día {dia}")
+    print(f"   llamadas reales ese día: {ESTADO['llamadas'] - antes}")
+    assert ESTADO["llamadas"] - antes <= 96
+    encontrados.append(n)
+    if dia > 1 and encontrados[-1] == encontrados[-2]: break
+    ESTADO["restantes"] = 100
+    assert dia < 25
+assert ESTADO["busquedas_cortas"] == 0, "Se enviaron búsquedas de menos de 4 letras"
+print("Días necesarios:", dia - 1, "· encontrados por día:", encontrados)
+assert encontrados[-1] >= 0.97 * len(verdad)
+
 x = pd.read_excel(out)
 assert list(x.columns[-3:]) == ["fecha_nacimiento", "altura_jugador", "peso_jugador"]
-assert (x["fecha_nacimiento"] == "No disponible").sum() > 0 and (x["altura_jugador"] == "No disponible").sum() > 0
-print(x[["nombre_jugador", "fecha_nacimiento", "altura_jugador", "peso_jugador"]].head(4).to_string())
+assert (x["fecha_nacimiento"] == "No disponible").sum() > 0
 rt = b4.leer_jugadores_api(out)
 assert rt["fecha_nacimiento"].dtype.kind == "M" and rt["altura_jugador"].dtype.kind == "f"
-# alturas correctas
 mal_h = sum(1 for i,(pid,b,h,w) in verdad.items() if h and pd.notna(rt.at[i,"altura_jugador"]) and rt.at[i,"altura_jugador"] != int(h.split()[0]))
-assert mal_h == 0; print("Alturas OK")
+assert mal_h == 0; print("Formato de salida y alturas OK")
 
-# --- Test 2: segunda ejecución -> todo desde caché, 0 llamadas ---
-antes = ESTADO["llamadas"]
-b4.extraer_datos_jugadores((RAIZ / "datos" / "jugadoresWC26.xlsx"), out, "FAKE", pausa=0, busqueda_individual=False)
-assert ESTADO["llamadas"] == antes; print("Caché OK: 0 llamadas en la segunda ejecución")
-
-# --- Test 3: plan no permite la temporada -> búsqueda individual con cuota limitada y reanudación ---
-shutil.rmtree(b4.DIR_CACHE); ESTADO.update(restantes=100, plan_bloquea_liga=True, llamadas=0)
-df3 = b4.extraer_datos_jugadores((RAIZ / "datos" / "jugadoresWC26.xlsx"), out, "FAKE", pausa=0, max_llamadas=95)
-n1 = df3["fecha_nacimiento"].notna().sum()
-print("Día 1 con plan bloqueado: encontrados", n1, "· llamadas", ESTADO["llamadas"])
-assert ESTADO["llamadas"] <= 96
-ESTADO.update(restantes=100)   # "al día siguiente"
-df3b = b4.extraer_datos_jugadores((RAIZ / "datos" / "jugadoresWC26.xlsx"), out, "FAKE", pausa=0, max_llamadas=95)
-n2 = df3b["fecha_nacimiento"].notna().sum()
-print("Día 2: encontrados", n2)
-assert n2 > n1
-ok = sum(1 for i,(pid,b,h,w) in verdad.items() if pd.notna(df3b.at[i,"fecha_nacimiento"]) and df3b.at[i,"fecha_nacimiento"].strftime("%Y-%m-%d") != b)
-extra = sum(1 for i in df3b.index if i not in verdad and pd.notna(df3b.at[i,"fecha_nacimiento"]))
-print("Búsqueda individual: erróneos", ok, "· asignados a ausentes", extra); assert ok == 0 and extra == 0
+# --- Test 2: ejecución extra -> todo desde caché, 0 llamadas ---
+antes = ESTADO["llamadas"]; ESTADO["restantes"] = 100
+b4.extraer_datos_jugadores(ENTRADA, out, "FAKE", pausa=0)
+assert ESTADO["llamadas"] == antes; print("Caché OK: 0 llamadas en la ejecución extra")
 
 # --- Test 4: OSM ---
 COORD = {"Estadio Azteca": (19.3029, -99.1505), "Estadio Akron": (20.6817, -103.4626), "Estadio BBVA": (25.6692, -100.2446),
@@ -176,3 +200,62 @@ print("Resumen estadios OK", tot[["estadio","partidos","goles"]].head(3).to_stri
 # dejar ficheros de prueba para el test del dashboard
 shutil.copy(out, TMP / "jugadoresWC26_api.xlsx"); shutil.copy(f_coord, TMP / "estadiosWC26_coordenadas.xlsx")
 print("\nTODOS LOS TESTS PASAN")
+
+# --- Test 5: football-data.org (ejercicio 4: 5 grandes ligas) ---
+sys.path.insert(0, str(RAIZ / "tests"))
+from clubes_2025_26 import CLUBES
+b4.F_CLUBES_LIGAS, b4.F_PLANTILLAS_LIGAS, b4.F_JUGADORES_LIGAS = TMP / "clubes.xlsx", TMP / "plant.xlsx", TMP / "jug_ligas.xlsx"
+ESTADO_FD = {"llamadas": 0, "con_plantillas": True, "bloquea_temporada": False, "tokens": set()}
+jug_mundial = pd.read_excel(ENTRADA)
+
+def fake_fd(url, params):
+    ESTADO_FD["llamadas"] += 1
+    codigo = url.split("/competitions/")[1].split("/")[0]
+    if ESTADO_FD["bloquea_temporada"] and "season" in params:
+        return Resp({"message": "The resource you are looking for is restricted.", "errorCode": 403}, status=403)
+    teams = []
+    for i, nombre in enumerate(CLUBES[codigo]):
+        corto = {"FC Internazionale Milano": "Inter", "Newcastle United FC": "Newcastle",
+                 "Atalanta BC": "Atalanta"}.get(nombre, nombre.replace(" FC", ""))   # como la API real
+        t = {"id": hash(nombre) % 10**6, "name": nombre, "shortName": corto}
+        if ESTADO_FD["con_plantillas"]:
+            sq = [{"id": 10**6 + k, "name": r.nombre_jugador, "position": "X", "dateOfBirth": "1999-02-03",
+                   "nationality": ALIAS_API.get(r.seleccion_nacional, r.seleccion_nacional)}
+                  for k, r in jug_mundial.iterrows() if b4.puntuacion_club(r.club_jugador, [nombre]) >= 0.8]
+            t["squad"] = sq + [{"id": 5 * 10**6 + i, "name": f"Relleno {i}", "position": "X",
+                                "dateOfBirth": "2001-01-01", "nationality": "Narnia"}]
+        teams.append(t)
+    return Resp({"season": {"startDate": "2026-08-15"}, "teams": teams})
+
+def get_fd(self, url, params=None, timeout=None):
+    ESTADO_FD["tokens"].add(self.headers.get("X-Auth-Token"))
+    return fake_fd(url, params or {})
+requests.Session.get = get_fd
+
+jl = b4.extraer_grandes_ligas(ENTRADA, "TOKEN_FD", pausa=0)
+assert ESTADO_FD["llamadas"] == 5 and ESTADO_FD["tokens"] == {"TOKEN_FD"}
+n5 = (jl["liga"] != b4.OTRAS_LIGAS).sum()
+assert 450 <= n5 <= 500, n5
+for club, liga in [("Charlton Athletic FC", b4.OTRAS_LIGAS), ("Rangers FC", b4.OTRAS_LIGAS),
+                   ("Newcastle United Jets FC", b4.OTRAS_LIGAS), ("Atalanta Bergamo", "Serie A"),
+                   ("Inter Miami CF", b4.OTRAS_LIGAS),
+                   ("Real Madrid C. F.", "LaLiga"), ("Manchester City FC", "Premier League")]:
+    if club in set(jl["club_jugador"]):
+        assert set(jl.loc[jl["club_jugador"] == club, "liga"]) == {liga}, club
+assert (jl["en_plantilla_api"] == "Sí").sum() >= 0.95 * n5        # cruce por nombre con las plantillas
+r = b4.resumen_ligas(b4.leer_jugadores_ligas(b4.F_JUGADORES_LIGAS))
+assert r["n_total"] == 1248 and r["por_seleccion"].shape[0] == 48
+assert list(r["evolucion"]["mundial"]) == [2018, 2022, 2026] and r["evolucion"]["pct_5_grandes"].iloc[0] == 52.3
+print(f"football-data OK · 5 llamadas · en 5 grandes ligas: {n5} ({r['pct5']:.1f} %)")
+
+# segunda ejecución: todo desde caché
+antes = ESTADO_FD["llamadas"]; b4.extraer_grandes_ligas(ENTRADA, "TOKEN_FD", pausa=0)
+assert ESTADO_FD["llamadas"] == antes; print("football-data caché OK")
+
+# plan sin plantillas y sin acceso a la temporada 2025 -> temporada actual, clasificación solo por club
+shutil.rmtree(b4.DIR_CACHE / "football_data"); ESTADO_FD.update(con_plantillas=False, bloquea_temporada=True, llamadas=0)
+jl2 = b4.extraer_grandes_ligas(ENTRADA, "TOKEN_FD", pausa=0)
+assert ESTADO_FD["llamadas"] == 10 and (jl2["liga"] != b4.OTRAS_LIGAS).sum() == n5
+assert set(jl2["en_plantilla_api"]) == {"No disponible"}
+print("football-data sin plantillas / temporada bloqueada OK")
+print("\nTODOS LOS TESTS PASAN (incluido ejercicio 4)")

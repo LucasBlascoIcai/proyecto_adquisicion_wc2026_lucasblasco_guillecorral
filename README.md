@@ -13,7 +13,7 @@ datos obtenidos vía API (api-football.com y OpenStreetMap).
 | `bloque1/` | Recopilación, limpieza e imputación | `main.py`, los 11 CSV originales y los 3 Excel que genera |
 | `bloque2/` | Análisis visual (Plotly) | `mainbloque2.py`, los 3 Excel de partida y la presentación con gráficos y conclusiones |
 | `bloque3/` | Cuadro de mando | `power_bi_bloque3.pbix` y los 3 Excel que usa como fuente |
-| `bloque4/` | Datos vía API + dashboard | `bloque4_WC26.py`, tests y datos (ver `bloque4/README.md`) |
+| `bloque4/` | Datos vía API (API-Football, football-data.org, OpenStreetMap) + dashboard | `bloque4_WC26.py`, tests y datos (ver `bloque4/README.md`) |
 
 ## Sobre los Excel de partida
 
@@ -49,6 +49,7 @@ cd bloque2 && python mainbloque2.py
 # Bloque 4: extracción vía API y dashboard
 cd bloque4
 python bloque4_WC26.py jugadores --api-key TU_CLAVE   # o variable de entorno APIFOOTBALL_KEY
+python bloque4_WC26.py ligas --token TU_TOKEN        # o variable de entorno FOOTBALLDATA_TOKEN
 python bloque4_WC26.py estadios
 streamlit run bloque4_WC26.py
 ```
