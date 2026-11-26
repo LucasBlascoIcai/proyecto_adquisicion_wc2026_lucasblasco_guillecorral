@@ -200,3 +200,59 @@ print("Resumen estadios OK", tot[["estadio","partidos","goles"]].head(3).to_stri
 # dejar ficheros de prueba para el test del dashboard
 shutil.copy(out, TMP / "jugadoresWC26_api.xlsx"); shutil.copy(f_coord, TMP / "estadiosWC26_coordenadas.xlsx")
 print("\nTODOS LOS TESTS PASAN")
+
+# --- Test 5: football-data.org (ejercicio 4: 5 grandes ligas) ---
+sys.path.insert(0, str(RAIZ / "tests"))
+from clubes_2025_26 import CLUBES
+b4.F_CLUBES_LIGAS, b4.F_PLANTILLAS_LIGAS, b4.F_JUGADORES_LIGAS = TMP / "clubes.xlsx", TMP / "plant.xlsx", TMP / "jug_ligas.xlsx"
+ESTADO_FD = {"llamadas": 0, "con_plantillas": True, "bloquea_temporada": False, "tokens": set()}
+jug_mundial = pd.read_excel(ENTRADA)
+
+def fake_fd(url, params):
+    ESTADO_FD["llamadas"] += 1
+    codigo = url.split("/competitions/")[1].split("/")[0]
+    if ESTADO_FD["bloquea_temporada"] and "season" in params:
+        return Resp({"message": "The resource you are looking for is restricted.", "errorCode": 403}, status=403)
+    teams = []
+    for i, nombre in enumerate(CLUBES[codigo]):
+        t = {"id": hash(nombre) % 10**6, "name": nombre, "shortName": nombre.replace(" FC", "")}
+        if ESTADO_FD["con_plantillas"]:
+            sq = [{"id": 10**6 + k, "name": r.nombre_jugador, "position": "X", "dateOfBirth": "1999-02-03",
+                   "nationality": ALIAS_API.get(r.seleccion_nacional, r.seleccion_nacional)}
+                  for k, r in jug_mundial.iterrows() if b4.puntuacion_club(r.club_jugador, [nombre]) >= 0.8]
+            t["squad"] = sq + [{"id": 5 * 10**6 + i, "name": f"Relleno {i}", "position": "X",
+                                "dateOfBirth": "2001-01-01", "nationality": "Narnia"}]
+        teams.append(t)
+    return Resp({"season": {"startDate": "2026-08-15"}, "teams": teams})
+
+def get_fd(self, url, params=None, timeout=None):
+    ESTADO_FD["tokens"].add(self.headers.get("X-Auth-Token"))
+    return fake_fd(url, params or {})
+requests.Session.get = get_fd
+
+jl = b4.extraer_grandes_ligas(ENTRADA, "TOKEN_FD", pausa=0)
+assert ESTADO_FD["llamadas"] == 5 and ESTADO_FD["tokens"] == {"TOKEN_FD"}
+n5 = (jl["liga"] != b4.OTRAS_LIGAS).sum()
+assert 450 <= n5 <= 500, n5
+for club, liga in [("Charlton Athletic FC", b4.OTRAS_LIGAS), ("Rangers FC", b4.OTRAS_LIGAS),
+                   ("Newcastle United Jets FC", b4.OTRAS_LIGAS), ("Atalanta Bergamo", "Serie A"),
+                   ("Real Madrid C. F.", "LaLiga"), ("Manchester City FC", "Premier League")]:
+    if club in set(jl["club_jugador"]):
+        assert set(jl.loc[jl["club_jugador"] == club, "liga"]) == {liga}, club
+assert (jl["en_plantilla_api"] == "Sí").sum() >= 0.95 * n5        # cruce por nombre con las plantillas
+r = b4.resumen_ligas(b4.leer_jugadores_ligas(b4.F_JUGADORES_LIGAS))
+assert r["n_total"] == 1248 and r["por_seleccion"].shape[0] == 48
+assert list(r["evolucion"]["mundial"]) == [2018, 2022, 2026] and r["evolucion"]["pct_5_grandes"].iloc[0] == 52.3
+print(f"football-data OK · 5 llamadas · en 5 grandes ligas: {n5} ({r['pct5']:.1f} %)")
+
+# segunda ejecución: todo desde caché
+antes = ESTADO_FD["llamadas"]; b4.extraer_grandes_ligas(ENTRADA, "TOKEN_FD", pausa=0)
+assert ESTADO_FD["llamadas"] == antes; print("football-data caché OK")
+
+# plan sin plantillas y sin acceso a la temporada 2025 -> temporada actual, clasificación solo por club
+shutil.rmtree(b4.DIR_CACHE / "football_data"); ESTADO_FD.update(con_plantillas=False, bloquea_temporada=True, llamadas=0)
+jl2 = b4.extraer_grandes_ligas(ENTRADA, "TOKEN_FD", pausa=0)
+assert ESTADO_FD["llamadas"] == 10 and (jl2["liga"] != b4.OTRAS_LIGAS).sum() == n5
+assert set(jl2["en_plantilla_api"]) == {"No disponible"}
+print("football-data sin plantillas / temporada bloqueada OK")
+print("\nTODOS LOS TESTS PASAN (incluido ejercicio 4)")

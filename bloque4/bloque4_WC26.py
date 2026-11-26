@@ -1,17 +1,27 @@
 """
 Proyecto Colaborativo · Adquisición y Visualización de Datos · Mundial 2026
-BLOQUE 4 — Datos vía API (api-football.com + OpenStreetMap) y visualización
+BLOQUE 4 — Datos vía API (api-football.com, football-data.org y OpenStreetMap) y visualización
 
-Un único script con tres modos de uso:
+Ejercicios del enunciado (v5) y dónde se resuelven:
+  Ej. 3  Fecha de nacimiento de los jugadores del Mundial -> comando 'jugadores' + pestaña 1 del dashboard
+  Ej. 4  Jugadores del Mundial en las 5 grandes ligas      -> comando 'ligas'     + pestaña 2 del dashboard
+  Ej. 6  Coordenadas de los estadios (OpenStreetMap)        -> comando 'estadios'
+  Ej. 7  Mapa de estadios con selector de ronda             -> pestaña 3 del dashboard
 
-  1) Extraer fecha de nacimiento, altura y peso de los jugadores (API-Football):
+Modos de uso:
+
+  1) Ejercicio 3: fecha de nacimiento (y altura y peso) de los jugadores (API-Football):
          python bloque4_WC26.py jugadores --api-key TU_CLAVE
      (o definiendo la variable de entorno APIFOOTBALL_KEY)
 
-  2) Extraer latitud y longitud de los estadios (OpenStreetMap):
+  2) Ejercicio 4: jugadores del Mundial en las 5 grandes ligas (football-data.org):
+         python bloque4_WC26.py ligas --token TU_TOKEN
+     (o definiendo la variable de entorno FOOTBALLDATA_TOKEN)
+
+  3) Extraer latitud y longitud de los estadios (OpenStreetMap):
          python bloque4_WC26.py estadios
 
-  3) Dashboard interactivo (Streamlit + Plotly):
+  4) Dashboard interactivo (Streamlit + Plotly):
          streamlit run bloque4_WC26.py
 
 Todas las respuestas de las APIs se guardan en una caché local (carpeta cache/),
@@ -569,7 +579,208 @@ def leer_jugadores_api(ruta: Path = F_JUGADORES_API) -> pd.DataFrame:
 
 
 # =============================================================================
-# 3. OPENSTREETMAP: LATITUD Y LONGITUD DE LOS ESTADIOS
+# 3. FOOTBALL-DATA.ORG: JUGADORES DEL MUNDIAL EN LAS 5 GRANDES LIGAS
+# =============================================================================
+
+FD_URL = "https://api.football-data.org/v4"
+FD_PAUSA = 6.5               # plan gratuito: 10 llamadas/minuto
+FD_TEMPORADA = 2025          # temporada 2025/26: la de los clubes de los jugadores en el Mundial 2026
+GRANDES_LIGAS = {            # código de competición en football-data.org -> nombre
+    "PL": "Premier League",
+    "PD": "LaLiga",
+    "BL1": "Bundesliga",
+    "SA": "Serie A",
+    "FL1": "Ligue 1",
+}
+OTRAS_LIGAS = "Otras ligas"
+MUNDIALES_PREVIOS = {2018: (736, 385), 2022: (831, 417)}   # (jugadores totales, en las 5 grandes ligas)
+
+F_CLUBES_LIGAS = DIR_DATOS / "clubes_grandes_ligas.xlsx"
+F_PLANTILLAS_LIGAS = DIR_DATOS / "jugadores_grandes_ligas.xlsx"
+F_JUGADORES_LIGAS = DIR_DATOS / "jugadoresWC26_ligas.xlsx"
+
+# Palabras genéricas de los nombres de club que no ayudan a distinguirlos
+GENERICOS_CLUB = {"fc", "cf", "afc", "ac", "sc", "ssc", "as", "ss", "sv", "rc", "rcd", "ud", "cd", "sd", "ca",
+                  "club", "de", "del", "la", "le", "bc", "fussball", "futbol", "calcio", "football"}
+
+
+class ClienteFootballData:
+    """Cliente mínimo de football-data.org v4 (cabecera X-Auth-Token) con caché y pausas."""
+
+    def __init__(self, token: str, pausa: float = FD_PAUSA):
+        self.sesion = requests.Session()
+        self.sesion.headers.update({"X-Auth-Token": token})
+        self.cache = CacheJSON(DIR_CACHE / "football_data")
+        self.pausa = pausa
+        self.llamadas = 0
+        self._ultima = 0.0
+
+    def get(self, endpoint: str, params: dict | None = None) -> dict:
+        url, params = f"{FD_URL}/{endpoint}", params or {}
+        en_cache = self.cache.leer(url, params)
+        if en_cache is not None:
+            return en_cache
+        for _ in range(3):
+            espera = self.pausa - (time.time() - self._ultima)
+            if espera > 0:
+                time.sleep(espera)
+            resp = self.sesion.get(url, params=params, timeout=30)
+            self._ultima = time.time()
+            self.llamadas += 1
+            if resp.status_code == 429:                       # más de 10 llamadas por minuto
+                time.sleep(60)
+                continue
+            try:
+                datos = resp.json()
+            except ValueError:
+                datos = {}
+            if resp.status_code == 403:                       # recurso no incluido en el plan
+                raise PlanNoPermite(datos.get("message", "Recurso restringido para este plan"))
+            if resp.status_code >= 400:
+                raise RuntimeError(f"football-data.org {resp.status_code}: {datos.get('message', resp.text[:200])}")
+            self.cache.guardar(url, params, datos)
+            return datos
+        raise RuntimeError("football-data.org no respondió tras varios reintentos.")
+
+
+def tokens_club(nombre) -> list:
+    """Palabras significativas del nombre de un club (sin 'FC', 'CF', años de fundación...)."""
+    return [t for t in normalizar(nombre).split() if t not in GENERICOS_CLUB and len(t) > 1 and not t.isdigit()]
+
+
+def _palabra_club_igual(a: str, b: str) -> bool:
+    # casi idénticas: misma inicial y ≥92 % de parecido ('munchen'/'muenchen'); 'celtic' ≠ 'celta'
+    return a == b or (a[0] == b[0] and min(len(a), len(b)) >= 6 and SequenceMatcher(None, a, b).ratio() >= 0.92)
+
+
+def puntuacion_club(nuestro: str, nombres_api: list) -> float:
+    """Similitud [0,1] entre el club de nuestro Excel y un club de la API (nombre largo o corto).
+
+    Regla principal: TODAS las palabras de nuestro club deben estar en el nombre de la API, que
+    puede tener palabras de más ('Real Betis' ~ 'Real Betis Balompié', 'RC Lens' ~ 'Racing Club
+    de Lens'), pero no al revés ('Charlton Athletic' no es 'Athletic Club', 'Newcastle United
+    Jets' no es 'Newcastle United FC').
+    Excepción: si la API usa una sola palabra y es exactamente la primera de nuestro club
+    ('Atalanta BC' ~ 'Atalanta Bergamo').
+    """
+    t_nuestro, mejor = tokens_club(nuestro), 0.0
+    if not t_nuestro:
+        return 0.0
+    for nombre in nombres_api:
+        t_api = tokens_club(nombre)
+        if not t_api:
+            continue
+        secuencia = SequenceMatcher(None, normalizar(nuestro), normalizar(nombre)).ratio()
+        if all(any(_palabra_club_igual(a, b) for b in t_api) for a in t_nuestro):
+            mejor = max(mejor, 0.8 + 0.2 * secuencia)
+        elif len(t_api) == 1 and len(t_api[0]) >= 5 and t_api[0] == t_nuestro[0]:
+            mejor = max(mejor, 0.75 + 0.05 * secuencia)
+    return mejor
+
+
+def clasificar_clubes(clubes_nuestros: list, clubes_api: pd.DataFrame, umbral: float = 0.75) -> dict:
+    """Devuelve {club de nuestro Excel: fila de clubes_api} para los clubes de las 5 grandes ligas."""
+    filas = clubes_api.to_dict("records")
+    mapa = {}
+    for club in clubes_nuestros:
+        punt, fila = max(((puntuacion_club(club, [f["club"], f["club_corto"]]), f) for f in filas),
+                         key=lambda x: x[0], default=(0.0, None))
+        if punt >= umbral:
+            mapa[club] = fila
+    return mapa
+
+
+def extraer_grandes_ligas(ruta_jugadores: Path, token: str, temporada: int = FD_TEMPORADA,
+                          pausa: float = FD_PAUSA) -> pd.DataFrame:
+    """Ejercicio 4. Con 1 llamada por liga (/competitions/{código}/teams) se obtienen los
+    clubes de cada una de las 5 grandes ligas (y, si el plan lo incluye, sus plantillas).
+    Cada jugador del Mundial se asigna a la liga de su club; el resto, a 'Otras ligas'."""
+    cliente = ClienteFootballData(token, pausa=pausa)
+    clubes, plantillas = [], []
+    for codigo, liga in GRANDES_LIGAS.items():
+        try:
+            datos = cliente.get(f"competitions/{codigo}/teams", {"season": temporada})
+            temp_usada = temporada
+        except PlanNoPermite as e:                            # si no deja pedir esa temporada, la actual
+            print(f"   ! {liga} {temporada}: {e} -> se usa la temporada actual")
+            datos = cliente.get(f"competitions/{codigo}/teams")
+            temp_usada = (datos.get("season") or {}).get("startDate", "actual")[:4]
+        equipos = datos.get("teams", [])
+        print(f"   {liga:<15} temporada {temp_usada}: {len(equipos)} clubes · llamadas: {cliente.llamadas}")
+        for t in equipos:
+            clubes.append({"liga": liga, "club_id": t.get("id"), "club": t.get("name"),
+                           "club_corto": t.get("shortName") or t.get("name")})
+            for p in t.get("squad") or []:
+                plantillas.append({"liga": liga, "club": t.get("name"), "jugador_id": p.get("id"),
+                                   "nombre": p.get("name"), "posicion": p.get("position"),
+                                   "fecha_nacimiento": p.get("dateOfBirth"), "nacionalidad": p.get("nationality")})
+    df_clubes = pd.DataFrame(clubes)
+    df_clubes.to_excel(F_CLUBES_LIGAS, index=False)
+    df_plant = pd.DataFrame(plantillas)
+    if not df_plant.empty:
+        df_plant.to_excel(F_PLANTILLAS_LIGAS, index=False)
+        print(f"   Plantillas descargadas: {len(df_plant)} jugadores en las 5 grandes ligas")
+    else:
+        print("   ! El plan no incluye plantillas: la clasificación se hace solo por club")
+
+    # --- Liga de cada jugador del Mundial según su club ---
+    jugadores = pd.read_excel(ruta_jugadores)
+    mapa = clasificar_clubes(jugadores["club_jugador"].dropna().unique().tolist(), df_clubes)
+    jugadores["liga"] = jugadores["club_jugador"].map(lambda c: mapa[c]["liga"] if c in mapa else OTRAS_LIGAS)
+    jugadores["club_api"] = jugadores["club_jugador"].map(lambda c: mapa[c]["club"] if c in mapa else NO_DISPONIBLE)
+
+    # --- Si hay plantillas: cruce por nombre y nacionalidad (comprobación + fecha de nacimiento) ---
+    jugadores["en_plantilla_api"] = NO_DISPONIBLE if df_plant.empty else "No"
+    jugadores["fecha_nacimiento_fd"] = pd.NaT
+    if not df_plant.empty:
+        cand = [{"id": r.jugador_id, "nombre": r.nombre, "nombre_completo": r.nombre, "equipo": r.nacionalidad,
+                 "nacionalidad": r.nacionalidad, "fecha_nacimiento": r.fecha_nacimiento}
+                for r in df_plant.itertuples()]
+        for idx, c in emparejar(jugadores, cand, umbral=0.75, umbral_global=1.1).items():
+            jugadores.at[idx, "en_plantilla_api"] = "Sí"
+            jugadores.at[idx, "fecha_nacimiento_fd"] = pd.to_datetime(c["fecha_nacimiento"], errors="coerce")
+        print(f"   Jugadores del Mundial encontrados en esas plantillas: {(jugadores['en_plantilla_api'] == 'Sí').sum()}")
+
+    salida = jugadores.copy()
+    salida["fecha_nacimiento_fd"] = pd.to_datetime(salida["fecha_nacimiento_fd"]).dt.strftime("%d/%m/%Y")
+    salida["fecha_nacimiento_fd"] = salida["fecha_nacimiento_fd"].fillna(NO_DISPONIBLE)
+    salida.to_excel(F_JUGADORES_LIGAS, index=False)
+
+    n5 = int((jugadores["liga"] != OTRAS_LIGAS).sum())
+    print(f"\nClubes de las 5 grandes ligas encontrados en nuestro Excel: {len(mapa)}")
+    print(f"Jugadores del Mundial en las 5 grandes ligas: {n5}/{len(jugadores)} ({100 * n5 / len(jugadores):.1f} %)")
+    print(jugadores["liga"].value_counts().to_string())
+    print(f"Llamadas reales a football-data.org: {cliente.llamadas} · Guardado en {F_JUGADORES_LIGAS}")
+    return jugadores
+
+
+def leer_jugadores_ligas(ruta: Path = F_JUGADORES_LIGAS) -> pd.DataFrame:
+    df = pd.read_excel(ruta)
+    df["fecha_nacimiento_fd"] = pd.to_datetime(df["fecha_nacimiento_fd"].replace(NO_DISPONIBLE, np.nan),
+                                               format="%d/%m/%Y", errors="coerce")
+    return df
+
+
+def resumen_ligas(jugadores: pd.DataFrame) -> dict:
+    """Tablas para el análisis del ejercicio 4."""
+    orden = list(GRANDES_LIGAS.values()) + [OTRAS_LIGAS]
+    por_liga = jugadores["liga"].value_counts().reindex(orden, fill_value=0)
+    por_sel = (pd.crosstab(jugadores["seleccion_nacional"], jugadores["liga"])
+               .reindex(columns=orden, fill_value=0))
+    por_sel["% 5 grandes"] = 100 * por_sel[list(GRANDES_LIGAS.values())].sum(axis=1) / por_sel[orden].sum(axis=1)
+    por_sel = por_sel.sort_values("% 5 grandes", ascending=False)
+    n_total, n5 = len(jugadores), int(por_liga[list(GRANDES_LIGAS.values())].sum())
+    evolucion = pd.DataFrame(
+        [(m, t, g) for m, (t, g) in MUNDIALES_PREVIOS.items()] + [(2026, n_total, n5)],
+        columns=["mundial", "jugadores_totales", "jugadores_5_grandes"])
+    evolucion["otras_ligas"] = evolucion["jugadores_totales"] - evolucion["jugadores_5_grandes"]
+    evolucion["pct_5_grandes"] = (100 * evolucion["jugadores_5_grandes"] / evolucion["jugadores_totales"]).round(1)
+    return {"por_liga": por_liga, "por_seleccion": por_sel, "evolucion": evolucion,
+            "n_total": n_total, "n5": n5, "pct5": 100 * n5 / n_total if n_total else np.nan}
+
+
+# =============================================================================
+# 4. OPENSTREETMAP: LATITUD Y LONGITUD DE LOS ESTADIOS
 # =============================================================================
 
 # Los estadios aparecen como "Nombre FIFA (Nombre comercial)". Con una expresión
@@ -724,7 +935,7 @@ def extraer_coordenadas_estadios(ruta_entrada: Path, ruta_salida: Path, pausa: f
 
 
 # =============================================================================
-# 4. ANÁLISIS (funciones puras, usadas por el dashboard)
+# 5. ANÁLISIS (funciones puras, usadas por el dashboard)
 # =============================================================================
 
 MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
@@ -758,8 +969,28 @@ def resumen_estadios(partidos: pd.DataFrame, coords: pd.DataFrame, rondas: list 
     return agg.merge(coords, on="estadio", how="inner")
 
 
+def cargar_fechas_nacimiento() -> pd.DataFrame | None:
+    """Jugadores del Mundial con su fecha de nacimiento combinando las dos fuentes:
+    API-Football (jugadoresWC26_api.xlsx) y football-data.org (jugadoresWC26_ligas.xlsx)."""
+    if not F_JUGADORES_API.exists() and not F_JUGADORES_LIGAS.exists():
+        return None
+    if F_JUGADORES_API.exists():
+        jug = leer_jugadores_api(F_JUGADORES_API)
+        jug["fuente_fecha"] = np.where(jug["fecha_nacimiento"].notna(), "API-Football", None)
+    else:
+        jug = pd.read_excel(F_JUGADORES)
+        jug["fecha_nacimiento"], jug["fuente_fecha"] = pd.NaT, None
+    if F_JUGADORES_LIGAS.exists():
+        fd = leer_jugadores_ligas(F_JUGADORES_LIGAS)
+        if len(fd) == len(jug):                                  # mismo orden de filas: el Excel del Bloque 1
+            falta = jug["fecha_nacimiento"].isna() & fd["fecha_nacimiento_fd"].notna()
+            jug.loc[falta, "fecha_nacimiento"] = fd.loc[falta, "fecha_nacimiento_fd"]
+            jug.loc[falta, "fuente_fecha"] = "football-data.org"
+    return jug
+
+
 # =============================================================================
-# 5. DASHBOARD (Streamlit + Plotly)
+# 6. DASHBOARD (Streamlit + Plotly)
 # =============================================================================
 
 def dashboard() -> None:
@@ -769,15 +1000,18 @@ def dashboard() -> None:
 
     st.set_page_config(page_title="Mundial 2026 · Bloque 4", page_icon="⚽", layout="wide")
     st.title("Mundial 2026 · Datos obtenidos vía API")
-    tab_nac, tab_map = st.tabs(["📅 Fecha de nacimiento de los jugadores", "🏟️ Mapa de estadios"])
+    tab_nac, tab_ligas, tab_map = st.tabs(["📅 Ej. 3 · Fecha de nacimiento", "🏆 Ej. 4 · 5 grandes ligas",
+                                           "🏟️ Ej. 7 · Mapa de estadios"])
 
-    # ---------------------- 5.1 Fecha de nacimiento ----------------------
+    # ---------------------- Ej. 3: fecha de nacimiento ----------------------
     with tab_nac:
-        if not F_JUGADORES_API.exists():
-            st.warning(f"No existe {F_JUGADORES_API.name}. Ejecute primero:  "
-                       "`python bloque4_WC26.py jugadores --api-key TU_CLAVE`")
+        jug = st.cache_data(cargar_fechas_nacimiento)()
+        if jug is None:
+            st.warning("No hay fechas de nacimiento. Ejecute primero:  "
+                       "`python bloque4_WC26.py jugadores` y/o `python bloque4_WC26.py ligas`")
         else:
-            jug = st.cache_data(leer_jugadores_api)(F_JUGADORES_API)
+            fuentes = jug["fuente_fecha"].value_counts()
+            st.caption("Fuente de las fechas de nacimiento: " + " · ".join(f"{k}: {v}" for k, v in fuentes.items()))
             c1, c2 = st.columns(2)
             posiciones = sorted(jug["posicion"].dropna().unique())
             sel_pos = c1.multiselect("Posición", posiciones, default=posiciones)
@@ -842,7 +1076,87 @@ def dashboard() -> None:
                     "oportunidades y llegan con más frecuencia a la élite."
                 )
 
-    # ---------------------- 5.2 Mapa de estadios ----------------------
+    # ---------------------- Ej. 4: 5 grandes ligas ----------------------
+    with tab_ligas:
+        if not F_JUGADORES_LIGAS.exists():
+            st.warning(f"No existe {F_JUGADORES_LIGAS.name}. Ejecute primero:  "
+                       "`python bloque4_WC26.py ligas --token TU_TOKEN`")
+        else:
+            jl = st.cache_data(leer_jugadores_ligas)(F_JUGADORES_LIGAS)
+            r = resumen_ligas(jl)
+            ligas5 = list(GRANDES_LIGAS.values())
+            colores = dict(zip(ligas5 + [OTRAS_LIGAS],
+                               ["#3d195b", "#ee2737", "#d20515", "#008fd7", "#dae025", "#b0b7c3"]))
+            ev = r["evolucion"].set_index("mundial")
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Jugadores del Mundial 2026", r["n_total"])
+            m2.metric("En las 5 grandes ligas", r["n5"], f"{r['pct5']:.1f} %", delta_color="off")
+            m3.metric("% en 2022", f"{ev.loc[2022, 'pct_5_grandes']:.1f} %")
+            m4.metric("Variación 2022 → 2026", f"{r['pct5'] - ev.loc[2022, 'pct_5_grandes']:+.1f} pp")
+
+            # Gráfico 1: jugadores por liga
+            pl_ = r["por_liga"]
+            fig1 = go.Figure(go.Bar(x=pl_.index, y=pl_.values, marker_color=[colores[x] for x in pl_.index],
+                                    text=[f"{v} ({100 * v / r['n_total']:.1f} %)" for v in pl_.values],
+                                    textposition="outside"))
+            fig1.update_layout(title="Jugadores del Mundial 2026 según la liga de su club",
+                               yaxis_title="Nº de jugadores", height=420)
+            st.plotly_chart(fig1, width="stretch")
+
+            # Gráfico 2: reparto por selección (100 % apilado), ordenado por peso de las 5 grandes ligas
+            ps = r["por_seleccion"]
+            pct = ps[ligas5 + [OTRAS_LIGAS]].div(ps[ligas5 + [OTRAS_LIGAS]].sum(axis=1), axis=0) * 100
+            fig2 = go.Figure()
+            for liga in ligas5 + [OTRAS_LIGAS]:
+                fig2.add_bar(y=pct.index, x=pct[liga], name=liga, orientation="h", marker_color=colores[liga],
+                             customdata=ps[liga], hovertemplate="%{y}: %{customdata} jugadores (%{x:.0f} %)<extra>"
+                             + liga + "</extra>")
+            fig2.update_layout(barmode="stack", title="Reparto de los jugadores de cada selección por liga",
+                               xaxis_title="% de la convocatoria", height=1150,
+                               yaxis=dict(autorange="reversed", automargin=True, dtick=1),
+                               legend=dict(orientation="h", y=1.0, yanchor="bottom", traceorder="normal"),
+                               margin=dict(t=110))
+            st.plotly_chart(fig2, width="stretch")
+
+            # Gráfico 3: comparación con los Mundiales anteriores
+            fig3 = go.Figure()
+            fig3.add_bar(x=ev.index.astype(str), y=ev["jugadores_5_grandes"], name="5 grandes ligas",
+                         marker_color="#2563eb")
+            fig3.add_bar(x=ev.index.astype(str), y=ev["otras_ligas"], name="Otras ligas", marker_color="#b0b7c3")
+            fig3.add_scatter(x=ev.index.astype(str), y=ev["pct_5_grandes"], name="% en 5 grandes ligas",
+                             yaxis="y2", mode="lines+markers+text", text=[f"{v:.1f} %" for v in ev["pct_5_grandes"]],
+                             textposition="top center", line=dict(color="#dc2626"))
+            fig3.update_layout(barmode="stack", title="Evolución: Mundiales 2018, 2022 y 2026",
+                               xaxis=dict(type="category", title="Mundial"),
+                               yaxis=dict(title="Nº de jugadores"),
+                               yaxis2=dict(title="% en 5 grandes ligas", overlaying="y", side="right",
+                                           range=[0, 100], dtick=20, ticksuffix=" %", showgrid=False),
+                               legend=dict(orientation="h", y=1.1), height=450)
+            st.plotly_chart(fig3, width="stretch")
+
+            # Conclusiones generadas a partir de los datos
+            top = pl_[ligas5].sort_values(ascending=False)
+            sin5 = ps[ps["% 5 grandes"] == 0].index.tolist()
+            todo5 = ps[ps["% 5 grandes"] >= 90].index.tolist()
+            st.subheader("Conclusiones")
+            st.markdown(
+                f"- **{r['n5']} de {r['n_total']}** jugadores ({r['pct5']:.1f} %) juegan en las 5 grandes ligas, "
+                f"frente al {ev.loc[2018, 'pct_5_grandes']:.1f} % de 2018 y el {ev.loc[2022, 'pct_5_grandes']:.1f} % de 2022.\n"
+                f"- La liga más representada es la **{top.index[0]}** ({top.iloc[0]} jugadores), seguida de "
+                f"{top.index[1]} ({top.iloc[1]}) y {top.index[2]} ({top.iloc[2]}).\n"
+                f"- Selecciones con ≥90 % de la convocatoria en las 5 grandes ligas: {', '.join(todo5) or 'ninguna'}. "
+                f"Sin ningún jugador en ellas: {', '.join(sin5) or 'ninguna'}.\n"
+                f"- Al pasar de 32 a 48 selecciones entran equipos con ligas menos potentes, por lo que el peso "
+                f"relativo de las 5 grandes ligas {'baja' if r['pct5'] < ev.loc[2022, 'pct_5_grandes'] else 'no baja'} "
+                f"({r['pct5'] - ev.loc[2022, 'pct_5_grandes']:+.1f} puntos respecto a 2022), aunque en número absoluto "
+                f"{'aumenta' if r['n5'] > ev.loc[2022, 'jugadores_5_grandes'] else 'no aumenta'} "
+                f"({r['n5'] - ev.loc[2022, 'jugadores_5_grandes']:+d} jugadores)."
+            )
+            with st.expander("Tabla por selección"):
+                st.dataframe(ps.round(1), width="stretch")
+
+    # ---------------------- Ej. 7: mapa de estadios ----------------------
     with tab_map:
         if not F_ESTADIOS_COORD.exists():
             st.warning(f"No existe {F_ESTADIOS_COORD.name}. Ejecute primero:  `python bloque4_WC26.py estadios`")
@@ -890,7 +1204,7 @@ def dashboard() -> None:
 
 
 # =============================================================================
-# 6. LÍNEA DE COMANDOS
+# 7. LÍNEA DE COMANDOS
 # =============================================================================
 
 def main(argv=None) -> None:
@@ -908,6 +1222,13 @@ def main(argv=None) -> None:
     pj.add_argument("--sin-busqueda-individual", action="store_true",
                     help="No usar /players/profiles para los jugadores no encontrados")
 
+    pl = sub.add_parser("ligas", help="Ejercicio 4: jugadores del Mundial en las 5 grandes ligas (football-data.org)")
+    pl.add_argument("--entrada", type=Path, default=F_JUGADORES)
+    pl.add_argument("--token", default=os.getenv("FOOTBALLDATA_TOKEN"),
+                    help="Token de football-data.org (por defecto, variable de entorno FOOTBALLDATA_TOKEN)")
+    pl.add_argument("--temporada", type=int, default=FD_TEMPORADA,
+                    help="Temporada de los clubes (2025 = 2025/26, la del Mundial)")
+
     pe = sub.add_parser("estadios", help="Latitud y longitud de los estadios desde OpenStreetMap")
     pe.add_argument("--entrada", type=Path, default=F_ESTADIOS,
                     help="Excel con la columna 'estadio' (si no existe, se crea desde partidosWC26.xlsx)")
@@ -920,6 +1241,10 @@ def main(argv=None) -> None:
         extraer_datos_jugadores(args.entrada, args.salida, args.api_key,
                                 temporadas=tuple(args.temporadas), max_llamadas=args.max_llamadas,
                                 busqueda_individual=not args.sin_busqueda_individual)
+    elif args.modo == "ligas":
+        if not args.token:
+            parser.error("Falta el token: use --token o la variable de entorno FOOTBALLDATA_TOKEN")
+        extraer_grandes_ligas(args.entrada, args.token, temporada=args.temporada)
     elif args.modo == "estadios":
         if not args.entrada.exists():
             print(f"Creando {args.entrada.name} a partir de {F_PARTIDOS.name}...")
