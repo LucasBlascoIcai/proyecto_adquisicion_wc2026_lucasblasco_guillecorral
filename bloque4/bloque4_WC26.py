@@ -120,6 +120,11 @@ def normalizar(texto) -> str:
     return re.sub(r"\s+", " ", texto).strip()
 
 
+def con_no_disponible(serie: pd.Series) -> pd.Series:
+    """Sustituye los nulos por 'No disponible' (para exportar a Excel)."""
+    return serie.astype(object).map(lambda v: NO_DISPONIBLE if pd.isna(v) else v)
+
+
 class CacheJSON:
     """Caché en disco: una respuesta JSON por consulta (clave = hash de la URL+params)."""
 
@@ -416,6 +421,8 @@ def emparejar(jugadores: pd.DataFrame, candidatos: list, umbral: float = 0.6, um
         pool = df_c[(df_c["equipo"] == equipo_api) | (df_c["nacionalidad"] == equipo_api)].to_dict("records")
         asignados.update(asignar_voraz(grupo, pool, umbral, usados))
 
+    if umbral_global > 1:                                 # fase global desactivada
+        return asignados
     libres = [c for c in cand_por_id.values() if c["id"] not in usados]
     for idx, nom in jugadores["nombre_jugador"].items():
         if idx in asignados or not libres:
@@ -562,16 +569,16 @@ def guardar_jugadores_api(jugadores: pd.DataFrame, ruta: Path) -> None:
     salida["fecha_nacimiento"] = salida["fecha_nacimiento"].dt.strftime("%d/%m/%Y")
     for col in ["altura_jugador", "peso_jugador"]:
         salida[col] = salida[col].map(lambda v: int(v) if pd.notna(v) else np.nan).astype(object)
-    salida[["fecha_nacimiento", "altura_jugador", "peso_jugador"]] = (
-        salida[["fecha_nacimiento", "altura_jugador", "peso_jugador"]].fillna(NO_DISPONIBLE)
-    )
+    for col in ["fecha_nacimiento", "altura_jugador", "peso_jugador"]:
+        salida[col] = con_no_disponible(salida[col])
     salida.to_excel(ruta, index=False)
 
 
 def leer_jugadores_api(ruta: Path = F_JUGADORES_API) -> pd.DataFrame:
     """Lee el Excel generado y vuelve a convertir 'No disponible' en nulos."""
     df = pd.read_excel(ruta)
-    df = df.replace(NO_DISPONIBLE, np.nan)
+    for col in ["fecha_nacimiento", "altura_jugador", "peso_jugador"]:
+        df[col] = df[col].where(df[col] != NO_DISPONIBLE)               # 'No disponible' -> nulo
     df["fecha_nacimiento"] = pd.to_datetime(df["fecha_nacimiento"], format="%d/%m/%Y", errors="coerce")
     for col in ["altura_jugador", "peso_jugador"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -666,14 +673,16 @@ def puntuacion_club(nuestro: str, nombres_api: list) -> float:
     t_nuestro, mejor = tokens_club(nuestro), 0.0
     if not t_nuestro:
         return 0.0
-    for nombre in nombres_api:
+    for i, nombre in enumerate(nombres_api):
         t_api = tokens_club(nombre)
         if not t_api:
             continue
         secuencia = SequenceMatcher(None, normalizar(nuestro), normalizar(nombre)).ratio()
         if all(any(_palabra_club_igual(a, b) for b in t_api) for a in t_nuestro):
             mejor = max(mejor, 0.8 + 0.2 * secuencia)
-        elif len(t_api) == 1 and len(t_api[0]) >= 5 and t_api[0] == t_nuestro[0]:
+        # la excepción solo con el nombre COMPLETO de la API (el primero): con el corto, 'Inter'
+        # casaría con 'Inter Miami CF' y 'Newcastle' con 'Newcastle United Jets FC'
+        elif i == 0 and len(t_api) == 1 and len(t_api[0]) >= 5 and t_api[0] == t_nuestro[0]:
             mejor = max(mejor, 0.75 + 0.05 * secuencia)
     return mejor
 
@@ -743,7 +752,7 @@ def extraer_grandes_ligas(ruta_jugadores: Path, token: str, temporada: int = FD_
 
     salida = jugadores.copy()
     salida["fecha_nacimiento_fd"] = pd.to_datetime(salida["fecha_nacimiento_fd"]).dt.strftime("%d/%m/%Y")
-    salida["fecha_nacimiento_fd"] = salida["fecha_nacimiento_fd"].fillna(NO_DISPONIBLE)
+    salida["fecha_nacimiento_fd"] = con_no_disponible(salida["fecha_nacimiento_fd"])
     salida.to_excel(F_JUGADORES_LIGAS, index=False)
 
     n5 = int((jugadores["liga"] != OTRAS_LIGAS).sum())
@@ -756,7 +765,7 @@ def extraer_grandes_ligas(ruta_jugadores: Path, token: str, temporada: int = FD_
 
 def leer_jugadores_ligas(ruta: Path = F_JUGADORES_LIGAS) -> pd.DataFrame:
     df = pd.read_excel(ruta)
-    df["fecha_nacimiento_fd"] = pd.to_datetime(df["fecha_nacimiento_fd"].replace(NO_DISPONIBLE, np.nan),
+    df["fecha_nacimiento_fd"] = pd.to_datetime(df["fecha_nacimiento_fd"].where(df["fecha_nacimiento_fd"] != NO_DISPONIBLE),
                                                format="%d/%m/%Y", errors="coerce")
     return df
 
@@ -927,7 +936,8 @@ def extraer_coordenadas_estadios(ruta_entrada: Path, ruta_salida: Path, pausa: f
              for r in estadios.itertuples(index=False)]
     resultado = pd.DataFrame(filas)
     salida = resultado.copy()
-    salida[["latitud", "longitud"]] = salida[["latitud", "longitud"]].astype(object).fillna(NO_DISPONIBLE)
+    for col in ["latitud", "longitud"]:
+        salida[col] = con_no_disponible(salida[col])
     salida.to_excel(ruta_salida, index=False)
     print(f"\nLlamadas reales a OSM: {cliente.llamadas} · localizados {resultado['latitud'].notna().sum()}/{len(resultado)}")
     print(f"Guardado en {ruta_salida}")
@@ -1162,7 +1172,9 @@ def dashboard() -> None:
             st.warning(f"No existe {F_ESTADIOS_COORD.name}. Ejecute primero:  `python bloque4_WC26.py estadios`")
             return
         partidos = st.cache_data(cargar_partidos)(F_PARTIDOS)
-        coords = pd.read_excel(F_ESTADIOS_COORD).replace(NO_DISPONIBLE, np.nan)
+        coords = pd.read_excel(F_ESTADIOS_COORD)
+        coords[["latitud", "longitud"]] = coords[["latitud", "longitud"]].where(
+            coords[["latitud", "longitud"]] != NO_DISPONIBLE)
         coords[["latitud", "longitud"]] = coords[["latitud", "longitud"]].apply(pd.to_numeric, errors="coerce")
         coords = coords.dropna(subset=["latitud", "longitud"])
 

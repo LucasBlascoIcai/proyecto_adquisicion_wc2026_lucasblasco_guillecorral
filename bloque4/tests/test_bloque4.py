@@ -1,5 +1,5 @@
 """Pruebas del Bloque 4 con APIs simuladas (mismo formato JSON que las reales)."""
-import importlib.util, json, random, shutil, sys, unicodedata
+import importlib.util, random, shutil, sys, unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
 import numpy as np, pandas as pd, requests
@@ -215,7 +215,9 @@ def fake_fd(url, params):
         return Resp({"message": "The resource you are looking for is restricted.", "errorCode": 403}, status=403)
     teams = []
     for i, nombre in enumerate(CLUBES[codigo]):
-        t = {"id": hash(nombre) % 10**6, "name": nombre, "shortName": nombre.replace(" FC", "")}
+        corto = {"FC Internazionale Milano": "Inter", "Newcastle United FC": "Newcastle",
+                 "Atalanta BC": "Atalanta"}.get(nombre, nombre.replace(" FC", ""))   # como la API real
+        t = {"id": hash(nombre) % 10**6, "name": nombre, "shortName": corto}
         if ESTADO_FD["con_plantillas"]:
             sq = [{"id": 10**6 + k, "name": r.nombre_jugador, "position": "X", "dateOfBirth": "1999-02-03",
                    "nationality": ALIAS_API.get(r.seleccion_nacional, r.seleccion_nacional)}
@@ -236,6 +238,7 @@ n5 = (jl["liga"] != b4.OTRAS_LIGAS).sum()
 assert 450 <= n5 <= 500, n5
 for club, liga in [("Charlton Athletic FC", b4.OTRAS_LIGAS), ("Rangers FC", b4.OTRAS_LIGAS),
                    ("Newcastle United Jets FC", b4.OTRAS_LIGAS), ("Atalanta Bergamo", "Serie A"),
+                   ("Inter Miami CF", b4.OTRAS_LIGAS),
                    ("Real Madrid C. F.", "LaLiga"), ("Manchester City FC", "Premier League")]:
     if club in set(jl["club_jugador"]):
         assert set(jl.loc[jl["club_jugador"] == club, "liga"]) == {liga}, club
